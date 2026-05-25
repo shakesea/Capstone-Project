@@ -1,0 +1,11 @@
+*.parquet
+*.csv
+*.zip
+.ipynb_checkpoints/
+__pycache__/
+.venv/
+.DS_Store
+*.log
+# Intentionally omitted: *.md would exclude README.md and SourceOfTruth.md
+# If you need to exclude generated markdown, use a more specific pattern like:
+# reports/*.md
