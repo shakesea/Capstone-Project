@@ -291,11 +291,10 @@ def build_context(
         "peak_hour": peak_hour,
     }
 
-    # ── Bundling Rules ────────────────────────────────────────────────────
-    if rules_df is not None and segment_name:
-        seg_rules = rules_df[rules_df["segment_name"] == segment_name]
+    # ── Bundling Rules (global, not per-segment) ──────────────────────────
+    if rules_df is not None and len(rules_df) > 0:
         ctx["bundling_rules"] = []
-        for _, r in seg_rules.head(5).iterrows():
+        for _, r in rules_df.head(5).iterrows():
             ctx["bundling_rules"].append({
                 "A": str(r.get("antecedents", "")),
                 "B": str(r.get("consequents", "")),
