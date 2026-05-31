@@ -246,6 +246,17 @@ Dokumen ini berfungsi sebagai **Data Catalog, Skema Data, dan Kebijakan Integrit
 
 **Skema**: Identik dengan `df_transaction_features.parquet`.
 
+#### df_forecast_90days.parquet — Forecast Output untuk Voucher Engine
+**Baris**: 900 (90 hari x 10 cabang) | **Kegunaan**: Prediksi 90 hari ke depan `total_transactions` per cabang.
+
+| Kolom | Tipe Data | Deskripsi |
+|-------|-----------|-----------|
+| `branch` | string | Nama cabang (city) |
+| `created_at` | datetime64[ns] | Tanggal prediksi |
+| `total_transactions` | float64 | Prediksi jumlah transaksi (tepat setelah rekonstruksi T_makro + Residual_pred) |
+
+> **Asal**: Notebook `06_Modeling_and_Evaluation.ipynb` — model hybrid terbaik dipilih berdasarkan MAE test set terendah.
+
 ---
 
 ## 2. Hubungan Antar Tabel (Relational Mapping & Keys)
@@ -381,6 +392,13 @@ Raw CSV (Kaggle)
   │
   ▼ 06-EDA
   └── Visualisasi dan analisis bisnis
+  │
+  ▼ 06_Modeling_and_Evaluation
+  ├── A: Baseline models (ARIMA, SARIMA, Prophet) per cabang
+  ├── B: XGBoost pooled multivariate model
+  ├── C: Hybrid detrending (HWR-XGB, SARIMA-XGB, Prophet-XGB)
+  ├── D: Comparative evaluation + best model selection
+  └── Output: df_forecast_90days.parquet untuk Voucher Engine
 ```
 
 ### 3.2 Transformasi kunci: original_amount
@@ -438,6 +456,19 @@ final_amount = original_amount - discount_applied
 **Rasional**: Mencegah *data leakage* — model dilatih hanya pada data masa lalu dan diuji pada data masa depan, mensimulasikan *production setting*.
 
 **Data yang digunakan**: `df_transaction_features` (tidak termasuk `df_basket_apriori`).
+
+### 3.6b Pemisahan Data untuk Forecasting (Modeling)
+
+Notebook `06_Modeling_and_Evaluation` menggunakan cutoff temporal berbeda yang disesuaikan dengan kebutuhan agregasi harian:
+
+| Set | Batas Waktu | Jumlah Hari | Persentase |
+|-----|-------------|-------------|------------|
+| Train | < 2025-03-25 | ~635 hari | ~80% |
+| Test | >= 2025-03-25 | ~97 hari | ~20% |
+
+**Data yang digunakan**: `df_daily` (agregasi harian dari `df_transaction_features`, bukan data transaksi mentah).
+
+**Fitur harian**: `total_transactions`, `total_revenue`, `avg_basket`, `lag_1`, `lag_7`, `rolling_avg_7`, `voucher_rate`, `day_of_week`, `month`.
 
 ### 3.7 Transformasi kunci: Matriks Basket Apriori
 
@@ -522,6 +553,16 @@ final_amount = original_amount - discount_applied
 | Support threshold Apriori | 0,1% | 05-FE-Rev | Filter item jarang |
 | Temporal split ratio | 80/20 | 05-FE-Rev | Rasio train/test |
 | Z-score threshold | 3 | function.py | Ambang outlier Z-Score |
+| Cutoff baseline | 2025-03-25 | 06-Modeling | Temporal split untuk forecasting (model cutoff) |
+| Forecast horizon | 90 hari | 06-Modeling | Horizon prediksi ke depan |
+| Holt-Winters seasonal period | 365 | 06-Modeling | Periode musiman tahunan |
+| XGBoost n_estimators | 150 | 06-Modeling | Jumlah pohon boosting |
+| XGBoost max_depth | 3 | 06-Modeling | Kedalaman maksimum pohon |
+| XGBoost learning_rate | 0.03 | 06-Modeling | Learning rate |
+| XGBoost subsample | 0.7 | 06-Modeling | Fraksi sampel per pohon |
+| XGBoost reg_lambda | 10 | 06-Modeling | Regularisasi L2 |
+| Min support Apriori | 0.01 | aprioriMember/NonMember | Support minimum untuk frequent itemsets |
+| Min confidence Apriori | 0.1 | aprioriMember/NonMember | Confidence threshold association rules |
 
 ### 4.3 Kebijakan Preservasi Data
 
@@ -553,3 +594,106 @@ final_amount = original_amount - discount_applied
 | df_transaction_features | 14.623.691 | 16+ | ~500+ |
 | df_rfm | 2.196.257 | 5–8 | ~70 |
 | df_basket_apriori | 9.064.669 | 8 | ~804 |
+| df_forecast_90days | 900 | 3 | <1 |
+| df_forecast_90days_* | 900 (masing-masing) | 7 | <1 |
+
+> **Catatan**: Tabel `df_forecast_90days_*.parquet` dihasilkan oleh notebook `09-testingXgb` untuk setiap arsitektur hybrid (HWR-XGB, SARIMA-XGB, Prophet-XGB). Tabel tunggal `df_forecast_90days.parquet` dari notebook `06_Modeling_and_Evaluation` berisi output model terbaik saja.
+
+
+---
+
+## Evaluation Metrics
+
+The following metrics govern the validation phase across all predictive architectures in this repository. For implementation details, see individual processing notebooks.
+
+### 1. Mean Absolute Error (MAE)
+$$\text{MAE} = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|$$
+- **Context:** Applied as a scale-dependent metric to assess forecast quality directly interpretable in transaction counts.
+- **Limitation:** Insensitive to variance changes as it weights all errors linearly.
+
+### 2. Root Mean Squared Error (RMSE)
+$$\text{RMSE} = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}$$
+- **Context:** Serves as the primary loss function indicator, penalizing large deviations quadratically to ensure model stability against outliers.
+
+### 3. Coefficient of Determination ($R^2$)
+$$R^2 = 1 - \frac{\sum_{i=1}^{n} (y_i - \hat{y}_i)^2}{\sum_{i=1}^{n} (y_i - \bar{y})^2}$$
+- **Context:** Quantifies the proportion of variance explained by the model relative to a baseline mean predictor.
+
+### 4. Mean Absolute Percentage Error (MAPE)
+$$\text{MAPE} = \frac{1}{n} \sum_{i=1}^{n} \left| \frac{y_i - \hat{y}_i}{y_i} \right| \times 100\%$$
+- **Context:** Used for scale-independent comparison across different operational branches.
+- **Handling Constraints:** Stated errors are bounded against $y_i = 0$ cases via minor epsilon stabilization where applicable.
+
+## Time-Series Modeling Framework & Baselines
+
+Before integrating multivariate features via machine learning or hybrid architectures, univariate time-series models are established as lower-bound performance references. These baselines evaluate whether the target series contains exploitable temporal structures such as autocorrelation, deterministic trends, or stable seasonality.
+
+### Univariate Model Taxonomy & Constraints
+
+| Model | Class | Target Characteristics Captured | Structural Limitations / Failure Cases |
+| :--- | :--- | :--- | :--- |
+| **ARIMA** | Parametric | Autoregression ($p$), Differencing ($d$), Moving Average ($q$) | Strict wide-sense stationarity requirements; cannot capture seasonal structures natively. |
+| **SARIMA** | Parametric | ARIMA components with explicit Seasonal extensions ($P,D,Q)_m$ | High hyperparameter search space optimization cost; seasonal period ($m$) must be fixed and known a priori. |
+| **Prophet** | Additive | Piecewise linear/logistic trend, non-linear weekly/yearly seasonality, holiday effects | Tendency to over-smooth abrupt structural breaks; exhibits high predictive uncertainty in long-term extrapolation. |
+
+### Architectural Integration
+
+These univariate models establish the underlying baseline against which MLR, PCR, PLS, XGBoost, and the final Hybrid Forecasting systems are statistically cross-examined using Diebold-Mariano and Theil's U tests.
+
+## Hybrid Detrending Framework
+
+To address the recursive low-pass filter problem of pure XGBoost with autoregressive features, the series is decomposed into a macro component and a micro component:
+
+$$\hat{y}_{t+h} = T_{t+h}^{\text{macro}} + \Delta_{t+h}^{\text{micro}}$$
+
+where:
+- $T^{\text{macro}}$ is forecast by a univariate time-series model (Holt-Winters, SARIMA, or Prophet).
+- $\Delta^{\text{micro}}$ is predicted by XGBoost using only non-autoregressive features (day_of_week, month, voucher_rate), avoiding the recursive low-pass problem.
+
+### Residual Definition
+$$r_t = y_t - \hat{T}_t^{\text{macro}}$$
+XGBoost is trained on $r_t$ using calendar features only. The final forecast is the sum of the macro extrapolation and the XGBoost residual prediction.
+
+---
+
+## 5. Pipeline Revision Log
+
+The following modifications were introduced in the **Rev** notebooks relative to the original pipeline to improve determinism, auditability, and downstream modeling readiness.
+
+### 5.1 Data Cleaning (03-DataCleaning-Rev)
+
+| # | Fix | Description |
+|---|-----|-------------|
+| 1 | **Data Preservation** | `original_amount_header` is now backed up BEFORE overwriting, preserving the raw financial record. |
+| 2 | **Logic Reordering** | `original_amount` correction now runs BEFORE discount validation, so `calculated_discount` uses fresh, accurate values. |
+| 3 | **Deterministic Dedup** | Duplicate items now keep the row with the **maximum subtotal** instead of whichever row appears last after sorting. |
+| 4 | **Band-Aid Removed** | The discount capping logic is preserved but now runs against corrected `original_amount`, making it a genuine safeguard rather than a workaround for stale data. |
+
+### 5.2 Data Joining (04-JoinData-Rev)
+
+| # | Fix | Description |
+|---|-----|-------------|
+| 1 | **Input Validation** | Explicitly verifies that `original_amount_header` exists (audit trail from DataCleaning-Rev) before proceeding. |
+| 2 | **Column Cleanup Safety** | Uses explicit column name list instead of fragile `_x`/`_y` suffix matching. |
+| 3 | **Validation Enhancement** | Financial audit now also checks that `original_amount_header` is preserved with expected values. |
+
+### 5.3 Feature Engineering (05-FeatureEngineering-Rev)
+
+| # | Fix | Description |
+|---|-----|-------------|
+| 1 | **Deterministic Aggregation** | Replaced `.first()` with `.max()` for all transaction-level fields. `.first()` depends on DataFrame row order (which can change with Parquet reads); `.max()` is fully deterministic. |
+| 2 | **K-Means Readiness** | Added `RFM_Scaled` columns (StandardScaler) so Euclidean distance does not let Monetary dominate Recency/Frequency. |
+| 3 | **XGBoost Readiness** | Added a time-based train/test split framework (80/20 temporal cutoff) to prevent look-ahead data leakage. |
+| 4 | **Modeling-Friendly Encoding** | Added `is_weekend_bool` (0/1) and `is_voucher_used_bool` (0/1) for direct modeling consumption. |
+| 5 | **Input Validation** | Checks for `original_amount_header` from the audit trail. |
+
+### Detailed Rationale
+
+**Fix #1 -- Deterministic Aggregation:**
+The original code used `.first()` for 15/16 aggregation fields. `.first()` picks the first row encountered in each group, which depends on the arbitrary row order from Parquet reads. If data is shuffled or read differently, `.first()` can return different results. The fix replaces it with `.max()`: since all transaction-level fields are identical for items within the same transaction, `.max()` always returns the same value regardless of row order. Additionally, `basket_size` (sum of quantities) and `item_count` (unique items per transaction) are added as new features.
+
+**Fix #2 -- K-Means Readiness (RFM Scaling):**
+Raw RFM features operate on vastly different scales: Recency spans 0--730 days, Frequency follows a power-law distribution (1--40+ transactions), and Monetary ranges from Rp0 to Rp1,348+. K-Means clustering relies on Euclidean distance; without scaling, the Monetary dimension dominates distance calculations, rendering Recency and Frequency nearly irrelevant to cluster assignment. StandardScaler (z-score normalization) is applied to produce `RFM_Scaled_*` columns. A MinMaxScaler alternative is included as a commented option.
+
+**Fix #3 -- Temporal Train/Test Split for XGBoost:**
+The original pipeline lacked a mechanism to prevent data leakage in forecasting contexts. Training XGBoost on all available data -- including future transactions -- would allow the model to learn patterns from data that would not exist in a production setting. The fix creates a strict temporal split: the first 80% of the timeline is used for training, the remaining 20% for testing, based on `created_at` (transaction date). The cutoff date is stored in the Parquet file metadata for downstream consumption.
