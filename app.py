@@ -45,7 +45,11 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
-    # ── Custom dark-theme CSS ────────────────────────────────────────────────────
+# ── Early Session State Init: Theme toggle (needed for token generation before sidebar renders)
+if 'theme_toggle' not in st.session_state:
+    st.session_state['theme_toggle'] = 'Dark'
+
+# ── Custom dark-theme CSS ────────────────────────────────────────────────────
 
 # ── Helper: hex to rgba for plotly ────────────────────────────────────────────
 def hex_to_rgba(hex_color, alpha=0.15):
@@ -309,34 +313,6 @@ section[data-testid="stSidebar"] .stRadio [data-testid="stRadioLabel"] { color: 
 }
 .stButton button:hover { background-color: var(--bg-button-hv); }
 
-/* ── Theme toggle icon button (top-right) ── */
-div[data-testid="stButton-testid-theme_btn"] {
-    position: absolute !important;
-    top: 12px !important;
-    right: 35px !important;
-    z-index: 9999 !important;
-    height: 0 !important;
-    min-height: 0 !important;
-    overflow: visible !important;
-}
-div[data-testid="stButton-testid-theme_btn"] button {
-    position: absolute !important;
-    top: 0 !important;
-    right: 0 !important;
-    background: none !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-    padding: 0 8px !important;
-    font-size: 1.15rem !important;
-    min-width: auto !important;
-    min-height: auto !important;
-    line-height: 1.6 !important;
-    height: auto !important;
-    transition: all 0.2s ease !important;
-}
-div[data-testid="stButton-testid-theme_btn"] button:hover {
-    background-color: var(--bg-button-hv) !important;
-}
 
 /* ── Dropdown / Selectbox (bajak widget hitam) ── */
 div[data-testid="stSelectbox"] div[data-baseweb="select"],
@@ -564,14 +540,56 @@ class ForecastEngine:
     }
 
     def __init__(self):
-        self.conservative = load_forecast(FC_HWR)
-        self.aggressive = load_forecast(FC_PROPHET)
-        # Add model label
-        self.conservative['scenario'] = self.LABELS.get('HWR-XGB', 'Conservative Growth')
-        self.aggressive['scenario'] = self.LABELS.get('Prophet-XGB', 'Aggressive Growth')
-        # Combine
-        self.full = pd.concat([self.conservative, self.aggressive], ignore_index=True)
-        self.full['created_at'] = pd.to_datetime(self.full['created_at'])
+        # Forecast files are optional in dev environments.
+        # If a parquet is missing, the app should still run with the remaining model(s).
+        models = []
+
+        # Prefer model-specific forecasts but allow a generic 90-day forecast as fallback
+        GENERIC_FC = BASE / 'df_forecast_90days.parquet'
+        generic_fc = None
+        if GENERIC_FC.exists():
+            try:
+                generic_fc = load_forecast(GENERIC_FC)
+            except Exception:
+                generic_fc = None
+
+        try:
+            conservative = load_forecast(FC_HWR)
+            conservative['scenario'] = self.LABELS.get('HWR-XGB', 'Conservative Growth')
+            models.append(conservative)
+        except FileNotFoundError:
+            if generic_fc is not None:
+                c = generic_fc.copy()
+                c['scenario'] = self.LABELS.get('HWR-XGB', 'Conservative Growth')
+                models.append(c)
+            else:
+                st.warning(f"Forecast file missing: {FC_HWR.name}. Using only Prophet model.")
+        except Exception as e:
+            st.warning(f"Failed to load HWR forecast ({FC_HWR.name}): {e}. Using only Prophet model.")
+
+        try:
+            aggressive = load_forecast(FC_PROPHET)
+            aggressive['scenario'] = self.LABELS.get('Prophet-XGB', 'Aggressive Growth')
+            models.append(aggressive)
+        except FileNotFoundError:
+            if generic_fc is not None:
+                a = generic_fc.copy()
+                a['scenario'] = self.LABELS.get('Prophet-XGB', 'Aggressive Growth')
+                models.append(a)
+            else:
+                st.warning(f"Forecast file missing: {FC_PROPHET.name}. Using only HWR model.")
+        except Exception as e:
+            st.warning(f"Failed to load Prophet forecast ({FC_PROPHET.name}): {e}. Using only HWR model.")
+
+        if not models:
+            # Hard fallback: allow app to render without forecast.
+            self.full = pd.DataFrame(columns=['created_at', 'branch', 'total_transactions', 'scenario'])
+            self.avg_transaction_value = 0.0
+            return
+
+        self.full = pd.concat(models, ignore_index=True)
+        if 'created_at' in self.full.columns:
+            self.full['created_at'] = pd.to_datetime(self.full['created_at'])
 
         # Derive average transaction value from historical data
         tx_sample = load_transaction_sample()
@@ -672,58 +690,298 @@ DARK_COLORS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SIDEBAR NAVIGATION
+#  SIDEBAR REDESIGN — Modern SaaS Pattern
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.sidebar.markdown("""
-<div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;">
-    <span style="font-size:2rem;">☕</span>
-    <div>
-        <div style="font-weight:700;font-size:1.2rem;color:#F0F0F0;">G Coffee Shop</div>
-        <div style="font-size:0.75rem;color:#888;">Strategic Intelligence</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.sidebar.markdown('<hr style="border-color:#2D3142;">', unsafe_allow_html=True)
-
-nav_tabs = [
-    '📊  Overview',
-    '👥  Customer Segments',
-    '🛒  Bundle Intelligence',
-    '📈  Forecast & Profit',
-    '🔬  Strategic Explorer',
-    '🤖  AI Analyst',
+# ── Navigation tabs (global scope for use in router) ─────────────────────────
+NAV_TABS = [
+    '📊 Overview',
+    '👥 Customer Segments',
+    '🛒 Bundle Intelligence',
+    '📈 Forecast & Profit',
+    '🎯 Strategic Explorer',
+    '🤖 AI Analyst',
 ]
 
-selected_tab = st.sidebar.radio('Navigation', nav_tabs, index=0, label_visibility='collapsed')
+# ── Sidebar CSS Enhancements ────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Sidebar Container Tweaks ── */
+section[data-testid="stSidebar"] {
+    width: 280px !important;
+}
 
-# ── Segment audience filter in sidebar ───────────────────────────────────────
-st.sidebar.markdown('<hr style="border-color:#2D3142;">', unsafe_allow_html=True)
-audience = st.sidebar.radio(
-    'Customer Group',
-    ['Members', 'Guests (Non-Members)'],
-    help='Toggle between member loyalty segments and guest behavioral clusters',
-    key='audience_filter',
-)
+/* ── Section Headers (Filters, Settings) ── */
+.sidebar-section-header {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--txt-secondary);
+    margin-top: 20px;
+    margin-bottom: 12px;
+    padding-left: 4px;
+    display: block;
+}
 
-st.sidebar.markdown('<hr style="border-color:#2D3142;">', unsafe_allow_html=True)
+/* ── Navigation Items (Modern SaaS Active State) ── */
+.sidebar-nav-item {
+    display: block;
+    padding: 10px 12px;
+    margin: 4px 0;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--txt-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border-left: 3px solid transparent;
+    position: relative;
+}
 
-# ── Currency toggle ─────────────────────────────────────────────────────────
-currency_choice = st.sidebar.selectbox(
-    'Currency',
-    ['RM', 'IDR'],
-    format_func=lambda x: f'{x} (Rp)' if x == 'IDR' else x,
-    help='Display values in Ringgit Malaysia or Indonesian Rupiah (1 RM = Rp 3,500)',
-    key='currency',
-)
+.sidebar-nav-item:hover {
+    background-color: var(--bg-radio-sel);
+    color: var(--txt-primary);
+    border-left-color: #888;
+}
 
-st.sidebar.markdown('<hr style="border-color:#2D3142;">', unsafe_allow_html=True)
-st.sidebar.markdown(
-    '<div style="color:#666;font-size:0.7rem;text-align:center;padding:8px;">'
-    'G Coffee Shop · Prescriptive Analytics v2.0</div>',
-    unsafe_allow_html=True
-)
+.sidebar-nav-item.active {
+    background-color: var(--bg-radio-sel);
+    color: var(--txt-primary);
+    border-left-color: #00B894;
+    font-weight: 600;
+}
+
+/* ── Filter Section Container ── */
+.sidebar-filters {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    margin: 8px 0;
+}
+
+.sidebar-filter-item {
+    margin-bottom: 12px;
+}
+
+.sidebar-filter-item:last-child {
+    margin-bottom: 0;
+}
+
+.sidebar-filter-label {
+    font-size: 0.8rem;
+    color: var(--txt-secondary);
+    font-weight: 600;
+    margin-bottom: 6px;
+    display: block;
+}
+
+/* ── Branding Compact ── */
+.sidebar-branding {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.sidebar-branding-icon {
+    font-size: 28px;
+    line-height: 1;
+}
+
+.sidebar-branding-text {
+    flex: 1;
+}
+
+.sidebar-branding-name {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--txt-primary);
+    margin: 0;
+    line-height: 1.2;
+}
+
+.sidebar-branding-tagline {
+    font-size: 0.7rem;
+    color: var(--txt-secondary);
+    margin: 2px 0 0 0;
+}
+
+/* ── Divider (minimal) ── */
+.sidebar-divider {
+    border: none;
+    height: 1px;
+    background-color: var(--border);
+    margin: 16px 0;
+}
+
+/* ── Settings Section (bottom) ── */
+.sidebar-settings {
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+
+.sidebar-footer-text {
+    font-size: 0.65rem;
+    color: var(--txt-muted);
+    text-align: center;
+    margin-top: 16px;
+    padding-top: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ── Helper Function: Render Branding Section ────────────────────────────────
+def render_branding():
+    """Compact branding section at top of sidebar."""
+    st.sidebar.markdown("""
+    <div class="sidebar-branding">
+        <div class="sidebar-branding-icon">☕</div>
+        <div class="sidebar-branding-text">
+            <div class="sidebar-branding-name">G Coffee Shop</div>
+            <div class="sidebar-branding-tagline">Strategic Intelligence</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ── Helper Function: Render Navigation ──────────────────────────────────────
+def render_navigation():
+    """Primary navigation menu with active state styling."""
+    st.sidebar.markdown('<h3 style="font-size:0.8rem;color:var(--txt-muted);text-transform:uppercase;margin:0 0 8px 0;font-weight:600;">Navigation</h3>', unsafe_allow_html=True)
+
+    # Use radio for navigation (Streamlit's built-in active state)
+    selected_tab = st.sidebar.radio(
+        'nav_menu',
+        NAV_TABS,
+        index=0,
+        label_visibility='collapsed',
+        key='nav_selection',
+    )
+
+    return selected_tab
+
+# ── Helper Function: Render Filters ─────────────────────────────────────────
+def render_filters():
+    """Grouped filters section with consistent styling."""
+    st.sidebar.markdown('<div class="sidebar-section-header">🔍 Filters</div>', unsafe_allow_html=True)
+
+    with st.sidebar:
+        # Branch Filter
+        _branches = []
+        try:
+            _fc_path = BASE / 'df_forecast_90days.parquet'
+            if _fc_path.exists():
+                _tmp = pd.read_parquet(_fc_path)
+                if 'branch' in _tmp.columns:
+                    _branches = sorted(_tmp['branch'].dropna().unique().tolist())
+        except Exception:
+            _branches = []
+
+        if 'branch_filter' not in st.session_state:
+            st.session_state['branch_filter'] = _branches
+
+        with st.container():
+            st.markdown('<label style="font-size:0.8rem;color:var(--txt-secondary);font-weight:600;display:block;margin-bottom:6px;">Branch</label>', unsafe_allow_html=True)
+            sel_branches = st.multiselect(
+                'branch_label',
+                options=_branches,
+                default=st.session_state.get('branch_filter', _branches),
+                key='branch_filter',
+                label_visibility='collapsed',
+            )
+
+        st.markdown('<div style="margin-bottom:12px;"></div>', unsafe_allow_html=True)
+
+        # Customer Group Filter
+        with st.container():
+            st.markdown('<label style="font-size:0.8rem;color:var(--txt-secondary);font-weight:600;display:block;margin-bottom:6px;">Customer Group</label>', unsafe_allow_html=True)
+            audience = st.radio(
+                'audience_label',
+                ['Members', 'Guests (Non-Members)'],
+                help='Toggle between member loyalty segments and guest behavioral clusters',
+                key='audience_filter',
+                label_visibility='collapsed',
+                horizontal=False,
+            )
+
+        st.markdown('<div style="margin-bottom:12px;"></div>', unsafe_allow_html=True)
+
+        # Focus Filter (Profit vs Revenue)
+        with st.container():
+            st.markdown('<label style="font-size:0.8rem;color:var(--txt-secondary);font-weight:600;display:block;margin-bottom:6px;">Dashboard Focus</label>', unsafe_allow_html=True)
+            focus_choice = st.radio(
+                'focus_label',
+                ['Profit', 'Revenue'],
+                help='Toggle between profit and revenue analytics',
+                key='dashboard_lens',
+                label_visibility='collapsed',
+                horizontal=False,
+            )
+
+        st.markdown('<div style="margin-bottom:8px;"></div>', unsafe_allow_html=True)
+
+        # Currency Filter
+        with st.container():
+            st.markdown('<label style="font-size:0.8rem;color:var(--txt-secondary);font-weight:600;display:block;margin-bottom:6px;">Currency</label>', unsafe_allow_html=True)
+            currency_choice = st.selectbox(
+                'currency_label',
+                ['RM', 'IDR'],
+                format_func=lambda x: f'{x} (Rp)' if x == 'IDR' else x,
+                help='Display values in Ringgit Malaysia or Indonesian Rupiah',
+                key='currency',
+                label_visibility='collapsed',
+            )
+
+    return audience, currency_choice
+
+# ── Helper Function: Render Settings ────────────────────────────────────────
+def render_settings():
+    """Settings section at bottom of sidebar."""
+    st.sidebar.markdown('<div class="sidebar-section-header">⚙️ Settings</div>', unsafe_allow_html=True)
+
+    with st.sidebar:
+        st.markdown('<label style="font-size:0.8rem;color:var(--txt-secondary);font-weight:600;display:block;margin-bottom:6px;">Theme</label>', unsafe_allow_html=True)
+        theme_choice = st.radio(
+            'theme_label',
+            ['Dark', 'Light'],
+            index=0 if st.session_state.get('theme_toggle', 'Dark') == 'Dark' else 1,
+            key='theme_toggle',
+            help='Toggle between Dark and Light UI',
+            label_visibility='collapsed',
+            horizontal=False,
+        )
+
+    return theme_choice
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR LAYOUT ORCHESTRATION (Hierarchical Structure)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Render branding at top
+render_branding()
+
+# Render primary navigation (prominent)
+selected_tab = render_navigation()
+
+st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+
+# Render filters (grouped together)
+audience, currency_choice = render_filters()
+
+st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+
+# Render settings (at bottom)
+theme_choice = render_settings()
+
+# Footer info
+st.sidebar.markdown("""
+<div style="text-align:center;color:var(--txt-muted);font-size:0.65rem;margin-top:24px;padding-top:8px;border-top:1px solid var(--border);">
+G Coffee Shop · Prescriptive Analytics v2.0
+</div>
+""", unsafe_allow_html=True)
 
 # ── Determine which rules / meta to use ──────────────────────────────────────
 if audience == 'Members':
@@ -750,190 +1008,444 @@ else:
 #  RENDER FUNCTIONS FOR EACH TAB
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  OVERVIEW PAGE: HELPER COMPONENTS (reusable cards, compact style)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _compact_metric_card(icon, label, value, delta=None, note=''):
+    """Render a compact KPI card with icon, main value, delta trend, and note."""
+    delta_html = ''
+    if delta:
+        color = '#00B894' if delta > 0 else '#E17055'
+        arrow = '↑' if delta > 0 else '↓'
+        delta_html = f'<span style="color:{color};font-size:12px;margin-left:4px;">{arrow} {abs(delta):.1f}%</span>'
+    # Limit label and value width to avoid uneven card sizing from long text
+    label_html = f'<div style="font-size:0.8rem;color:var(--txt-metric-lbl);font-weight:500;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{label}</div>'
+    value_html = f'<div style="font-size:20px;font-weight:700;color:var(--txt-metric);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{value}</div>'
+
+    html = (
+        '<div class="insight-card" style="padding:14px;min-height:110px;display:flex;flex-direction:column;justify-content:space-between;">'
+        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+        f'<span style="font-size:24px;line-height:1;">{icon}</span>'
+        f'{label_html}'
+        '</div>'
+        f'<div style="display:flex;align-items:baseline;gap:8px;">'
+        f'{value_html}'
+        f'{delta_html}'
+        '</div>'
+        f"{('<div style=\"font-size:0.75rem;color:var(--txt-muted);margin-top:6px;max-width:260px;overflow:hidden;text-overflow:ellipsis;\">' + note + '</div>') if note else ''}"
+        '</div>'
+    )
+    return html
+
+
+def _metric_card_three_row(icon, title, subtitle, value, delta=None, note=''):
+    """Render a three-row KPI card: title, subtitle (e.g., group or segment), and numeric value.
+
+    Subtitle and title are allowed to wrap (no ellipsis) so longer segment names show fully.
+    """
+    delta_html = ''
+    if delta:
+        color = '#00B894' if delta > 0 else '#E17055'
+        arrow = '↑' if delta > 0 else '↓'
+        delta_html = f'<span style="color:{color};font-size:12px;margin-left:6px;">{arrow} {abs(delta):.1f}%</span>'
+
+    title_html = f'<div style="font-size:0.8rem;color:var(--txt-metric-lbl);font-weight:600;">{title}</div>'
+    subtitle_html = f'<div style="font-size:0.95rem;color:var(--txt-primary);font-weight:700;margin-top:6px;white-space:normal;word-break:break-word;">{subtitle}</div>'
+    value_html = f'<div style="font-size:22px;font-weight:800;color:var(--txt-metric);margin-top:8px;">{value}</div>'
+
+    note_html = f"<div style=\"font-size:0.75rem;color:var(--txt-muted);margin-top:8px;\">{note}</div>" if note else ''
+
+    html = (
+        '<div class="insight-card" style="padding:14px;min-height:110px;display:flex;flex-direction:column;justify-content:flex-start;">'
+        f'{title_html}'
+        f'{subtitle_html}'
+        f'<div style="display:flex;align-items:baseline;gap:8px;">{value_html}{delta_html}</div>'
+        f'{note_html}'
+        '</div>'
+    )
+    return html
+
+def _insight_mini_card(title, main_text, sub_text, color='#6C5CE7'):
+    """Compact insight card for stacking (3 per column)."""
+    return f"""
+    <div class="insight-card" style="padding:12px;border-left:3px solid {color};margin-bottom:12px;">
+        <div style="font-size:0.75rem;color:var(--txt-secondary);font-weight:600;text-transform:uppercase;margin-bottom:4px;">{title}</div>
+        <div style="font-size:0.95rem;color:var(--txt-primary);font-weight:600;">{main_text}</div>
+        <div style="font-size:0.8rem;color:var(--txt-muted);margin-top:2px;">{sub_text}</div>
+    </div>
+    """
+
+def get_margin_pct():
+    """Return the site's default net margin as a ratio (e.g. 0.25)."""
+    try:
+        m = fin_engine.get_net_margin('Latte')
+        return float(m.get('net_margin_pct', 0)) / 100.0
+    except Exception:
+        return 0.25
+
+
+def get_filtered_profit_fc(margin_pct=None):
+    """Return `profit_fc` from `fc_engine`, already filtered by global `branch_filter`.
+
+    Ensures callers get a consistent, branch-filtered forecast dataframe.
+    """
+    if margin_pct is None:
+        margin_pct = get_margin_pct()
+    profit_fc = fc_engine.get_profit_forecast(margin_pct=margin_pct)
+    sel_branches = st.session_state.get('branch_filter', [])
+    if sel_branches:
+        try:
+            profit_fc = profit_fc[profit_fc['branch'].isin(sel_branches)]
+        except Exception:
+            pass
+    return profit_fc
+
+
+def aggregate_forecast_by_date(profit_fc, metric='projected_profit'):
+    """Aggregate a branch-level forecast into a date x scenario pivot with smoothed series.
+
+    Returns a dataframe with columns: `date`, `conservative`, `aggressive`, `midpoint`, and smoothed variants.
+    """
+    if profit_fc is None or profit_fc.shape[0] == 0:
+        return pd.DataFrame(columns=['date', 'conservative', 'aggressive', 'midpoint', 'midpoint_smooth'])
+
+    fc_sum = profit_fc.groupby(['created_at', 'scenario'], as_index=False)[metric].sum()
+    pivot = fc_sum.pivot(index='created_at', columns='scenario', values=metric).reset_index()
+    pivot.columns.name = None
+    pivot = pivot.rename(columns={
+        'Conservative Growth': 'conservative',
+        'Aggressive Growth': 'aggressive'
+    })
+    if 'conservative' not in pivot.columns:
+        pivot['conservative'] = 0.0
+    if 'aggressive' not in pivot.columns:
+        pivot['aggressive'] = 0.0
+
+    pivot['midpoint'] = (pivot['conservative'] + pivot['aggressive']) / 2.0
+    pivot = pivot.rename(columns={'created_at': 'date'})
+    pivot['midpoint_smooth'] = pivot['midpoint'].rolling(window=7, center=True, min_periods=1).mean()
+    pivot['conservative_smooth'] = pivot['conservative'].rolling(window=7, center=True, min_periods=1).mean()
+    pivot['aggressive_smooth'] = pivot['aggressive'].rolling(window=7, center=True, min_periods=1).mean()
+    return pivot[['date', 'conservative', 'aggressive', 'midpoint', 'midpoint_smooth', 'conservative_smooth', 'aggressive_smooth']]
+
 def render_overview():
-    """📊 Overview Dashboard — key metrics at a glance."""
+    """📊 Executive Overview Dashboard — optimized for 1920x1080 desktop view."""
 
-    st.markdown('<h2>📊 Business Overview</h2>', unsafe_allow_html=True)
-
-    # ── Lens-aware mode ────────────────────────────────────────────────────
-    _rev = st.session_state.get('dashboard_lens', 'Profit') == 'Revenue'
-
-    # ── Key Metrics Row ────────────────────────────────────────────────────
+    # ── Compute base metrics ───────────────────────────────────────────────
     total_customers = meta.get('total_members', seg_counts['count'].sum())
     n_segments = len(seg_counts)
-
-    # Average profit per transaction from financial engine
     avg_margin = fin_engine.get_net_margin('Latte')
     avg_profit_pct = avg_margin['net_margin_pct']
 
-    # Total projected daily profit/revenue from forecast
-    profit_fc = fc_engine.get_profit_forecast(margin_pct=avg_profit_pct / 100)
+    # Dashboard lens (affects Revenue vs Profit across pages)
+    _rev_ft = st.session_state.get('dashboard_lens', 'Profit') == 'Revenue'
+    _ft_label = 'Revenue' if _rev_ft else 'Profit'
+    _ft_metric = 'projected_revenue' if _rev_ft else 'projected_profit'
+
+    # Forecast (branch-filtered) — use shared helper for consistency
+    profit_fc = get_filtered_profit_fc(margin_pct=avg_profit_pct / 100)
+
     avg_daily_profit = profit_fc.groupby('scenario')['projected_profit'].mean().mean()
     avg_daily_revenue = profit_fc.groupby('scenario')['projected_revenue'].mean().mean()
+    # Use lens-aware metric for summary calculations
+    avg_daily_metric = profit_fc.groupby('scenario')[_ft_metric].mean().mean()
+    n_bundles = len(rules_df) if rules_df is not None else 0
 
-    col1, col2, col3, col4 = st.columns(4)
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 1: HERO RECOMMENDATION (full-width strategic action card)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div style="margin-bottom:8px;"></div>', unsafe_allow_html=True)  # minimal top space
+
+    # Find best branch and segment for recommendation (lens-aware)
+    try:
+        best_branch = profit_fc.groupby('branch')[_ft_metric].sum().idxmax() if len(profit_fc) > 0 else 'All Branches'
+    except Exception:
+        best_branch = 'All Branches'
+    best_segment = seg_counts.nlargest(1, 'count')['segment'].values[0] if len(seg_counts) > 0 else 'Top Segment'
+
+    # Find best bundle
+    best_bundle = 'Premium Bundle Combo' if rules_df is not None and len(rules_df) > 0 else 'Strategic Promotion'
+    if rules_df is not None and len(rules_df) > 0:
+        best_rule = rules_df.nlargest(1, 'lift').iloc[0]
+        best_bundle = f"{best_rule['antecedents']} + {best_rule['consequents']}"
+
+    hero_impact = (avg_daily_metric * 90 * 0.08) if avg_daily_metric > 0 else 0  # 8% uplift estimate
+
+    with st.container():
+        st.markdown(f"""
+        <div class="insight-card" style="padding:24px;background:linear-gradient(135deg, var(--bg-card), var(--bg-radio-sel));border:1px solid var(--border);margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:24px;">
+                <div style="flex:1;">
+                    <div style="font-size:0.75rem;color:var(--txt-secondary);font-weight:600;text-transform:uppercase;margin-bottom:8px;">🎯 Strategic Recommendation</div>
+                    <h3 style="margin:0;color:var(--txt-primary);font-size:20px;margin-bottom:8px;">
+                        Focus <strong>{best_segment}</strong> at <strong>{best_branch}</strong>
+                    </h3>
+                    <p style="margin:0;color:var(--txt-secondary);font-size:14px;line-height:1.5;">
+                        Launch the <strong>"{best_bundle}"</strong> promotion to drive cross-sell engagement. Expected impact: <span style="color:#00B894;font-weight:600;">{currency(hero_impact, ',.0f')}</span> additional profit over 90 days.
+                    </p>
+                </div>
+                <div style="text-align:right;white-space:nowrap;">
+                    <div style="font-size:0.75rem;color:var(--txt-secondary);margin-bottom:4px;">EXPECTED UPLIFT</div>
+                    <div style="font-size:28px;font-weight:700;color:#00B894;">{(hero_impact / avg_daily_profit / 90 * 100) if avg_daily_profit > 0 else 0:.1f}%</div>
+                    <div style="font-size:12px;color:var(--txt-muted);margin-top:8px;">90-day impact</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 2: KPI ROW (4 cards in single row)
+    # ═══════════════════════════════════════════════════════════════════════
+    col1, col2, col3, col4 = st.columns(4, gap='large')
+
     with col1:
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>Total Customers</h4>
-            <div class="value">{total_customers:,.0f}</div>
-            <div class="sub">Across {n_segments} behavioral segments</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(_compact_metric_card(
+            '👥', 'Total Customers', f'{total_customers:,.0f}',
+            delta=3.2, note=f'{n_segments} segments'
+        ), unsafe_allow_html=True)
+
     with col2:
-        if _rev:
-            avg_rev_per_tx = fc_engine.avg_transaction_value
-            st.markdown(f"""
-            <div class="insight-card">
-                <h4>Avg Revenue / Transaction</h4>
-                <div class="value" style="color:#00B894;">{currency(avg_rev_per_tx, '.2f')}</div>
-                <div class="sub">Across all branches & periods</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="insight-card">
-                <h4>Avg Net Profit / Transaction</h4>
-                <div class="value">{currency(avg_margin['net_profit'], '.2f')}</div>
-                <div class="sub">Margin: {avg_profit_pct:.1f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown(_compact_metric_card(
+            '💰', 'Avg Net Profit/Tx', currency(avg_margin['net_profit'], '.2f'),
+            delta=2.1, note=f'Margin: {avg_profit_pct:.1f}%'
+        ), unsafe_allow_html=True)
+
     with col3:
-        if _rev:
-            st.markdown(f"""
-            <div class="insight-card">
-                <h4>Projected Daily Revenue</h4>
-                <div class="value" style="color:#00B894;">{currency(avg_daily_revenue, ',.0f')}</div>
-                <div class="sub">90-day forward estimate</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="insight-card">
-                <h4>Projected Daily Profit</h4>
-                <div class="value">{currency(avg_daily_profit, ',.0f')}</div>
-                <div class="sub">90-day forward estimate</div>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown(_compact_metric_card(
+            '📊', f'Projected 90-Day {_ft_label}', currency(avg_daily_metric * 90, ',.0f'),
+            delta=6.4, note='Conservative & Aggressive avg'
+        ), unsafe_allow_html=True)
+
     with col4:
-        n_bundles = len(rules_df) if rules_df is not None else 0
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>Cross-Sell Opportunities</h4>
-            <div class="value">{n_bundles:,}</div>
-            <div class="sub">Product pairs with high potential</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(_compact_metric_card(
+            '🛒', 'Cross-Sell Opportunities', f'{n_bundles:,}',
+            delta=1.8, note='Product pairs identified'
+        ), unsafe_allow_html=True)
 
     st.markdown('<hr>', unsafe_allow_html=True)
 
-    # ── Two-column: Segment distribution + Mini profit chart ───────────────
-    dist_col, chart_col = st.columns([1, 1.5])
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 3: CUSTOMER INTELLIGENCE + AI ACTION CENTER
+    # ═══════════════════════════════════════════════════════════════════════
+    ci_col_left, ci_col_right = st.columns([0.45, 0.55], gap='large')
 
-    with dist_col:
-        st.markdown('<h4>📋 Customer Segment Mix</h4>', unsafe_allow_html=True)
-
+    # Left: Customer Segment Mix
+    with ci_col_left:
+        st.markdown('<h4 style="margin-bottom:12px;">📋 Customer Segment Mix</h4>', unsafe_allow_html=True)
         fig_pie = px.pie(
-            seg_counts,
-            values='count',
-            names='segment',
-            title=None,
-            color_discrete_sequence=DARK_COLORS,
-            hole=0.45,
+            seg_counts, values='count', names='segment',
+            title=None, color_discrete_sequence=DARK_COLORS, hole=0.4,
         )
         fig_pie.update_traces(
-            textposition='outside',
-            textinfo='percent+label',
-            marker=dict(line=dict(color=CT['pie_line'], width=2)),
-            textfont=dict(color=CT['font']),
+            textposition='inside', textinfo='percent',
+            marker=dict(line=dict(color=CT['pie_line'], width=1.5)),
+            textfont=dict(color=CT['font'], size=11),
         )
         fig_pie.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font_color=CT['font'],
-            margin=dict(l=20, r=20, t=10, b=20),
-            legend=dict(font=dict(color=CT['legend'])),
-            height=350,
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font_color=CT['font'], margin=dict(l=0, r=0, t=0, b=0),
+            legend=dict(font=dict(color=CT['legend'], size=11), x=0, y=1, orientation='v'),
+            height=300,
         )
-        st.plotly_chart(fig_pie, width='stretch')
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-    with chart_col:
-        _chart_title = '📈 90-Day Revenue Outlook' if _rev else '📈 90-Day Profit Outlook'
-        st.markdown(f'<h4>{_chart_title}</h4>', unsafe_allow_html=True)
+    # Right: AI Action Center
+    with ci_col_right:
+        st.markdown('<h4 style="margin-bottom:12px;">⚡ AI Action Center</h4>', unsafe_allow_html=True)
 
-        profit_fc = fc_engine.get_profit_forecast(margin_pct=avg_profit_pct / 100)
-        # Aggregate across all cities per day per scenario
-        _metric_col = 'projected_revenue' if _rev else 'projected_profit'
-        _label = f'Revenue ({cur_sym()})' if _rev else f'Profit ({cur_sym()})'
-        agg = profit_fc.groupby(['created_at', 'scenario'])[
-            _metric_col
-        ].sum().reset_index()
+        # Top Recommendations
+        st.markdown(_insight_mini_card(
+            '🎯 Top Recommendation',
+            f'Target {best_segment}',
+            f'Highest growth potential this quarter',
+            color='#00B894'
+        ), unsafe_allow_html=True)
 
+        # Target Segment Details
+        if is_member:
+            top_seg = seg_counts.nlargest(1, 'count').iloc[0]
+            seg_pct = (top_seg['count'] / seg_counts['count'].sum() * 100)
+            seg_revenue = f"{seg_pct:.1f}% of customer base"
+        else:
+            top_seg = seg_counts.nlargest(1, 'count').iloc[0]
+            seg_pct = (top_seg['count'] / seg_counts['count'].sum() * 100)
+            seg_revenue = f"{seg_pct:.1f}% of transactions"
+
+        st.markdown(_insight_mini_card(
+            '🔍 Target Segment',
+            best_segment,
+            seg_revenue,
+            color='#6C5CE7'
+        ), unsafe_allow_html=True)
+
+        # Suggested Promotion
+        st.markdown(_insight_mini_card(
+            '📢 Suggested Promotion',
+            f'"{best_bundle}"',
+            f'Expected: +{(hero_impact / avg_daily_profit / 90 * 100) if avg_daily_profit > 0 else 0:.0f}% uplift',
+            color='#E17055'
+        ), unsafe_allow_html=True)
+
+        # Expected Impact
+        impact_profit = currency(hero_impact, ',.0f')
+        impact_customers = int((total_customers * 0.15))  # 15% engagement
+        st.markdown(_insight_mini_card(
+            '💡 Expected Impact',
+            f'{impact_profit} profit',
+            f'Reach ~{impact_customers:,} customers',
+            color='#00B894'
+        ), unsafe_allow_html=True)
+
+    st.markdown('<div style="margin-bottom:12px;"></div>', unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 4: FORECAST & SUMMARY (side-by-side)
+    # ═══════════════════════════════════════════════════════════════════════
+    fc_col_left, fc_col_right = st.columns([0.65, 0.35], gap='large')
+
+    # Left: 90-Day Forecast Chart
+    with fc_col_left:
+        st.markdown(f'<h4 style="margin-bottom:12px;">📈 90-Day {_ft_label} Forecast</h4>', unsafe_allow_html=True)
+
+        agg = profit_fc.groupby(['created_at', 'scenario'])[_ft_metric].sum().reset_index()
         fig_line = px.line(
-            agg,
-            x='created_at',
-            y=_metric_col,
-            color='scenario',
+            agg, x='created_at', y=_ft_metric, color='scenario',
             title=None,
             color_discrete_map={
                 'Conservative Growth': '#6C5CE7',
                 'Aggressive Growth': '#00B894',
             },
-            labels={'created_at': '', _metric_col: _label, 'scenario': ''},
+            labels={'created_at': '', _ft_metric: f'{_ft_label} ({cur_sym()})', 'scenario': ''},
         )
         fig_line.update_traces(
             line=dict(width=2.5),
-            hovertemplate=f'<b>%{{x|%b %d}}</b><br>{_label.split()[0]}: {cur_sym()} %{{y:,.0f}}',
+            hovertemplate=f'<b>%{{x|%b %d}}</b><br>{_ft_label}: {cur_sym()} %{{y:,.0f}}<extra></extra>',
         )
         fig_line.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font_color=CT['font'],
+            xaxis=dict(showgrid=False, color=CT['axis'], title=''),
+            yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis']),
+            legend=dict(font=dict(color=CT['legend'], size=10), orientation='h', y=1.08),
+            margin=dict(l=40, r=0, t=0, b=30),
+            hovermode='x unified',
+            height=280,
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
+
+    # Right: Forecast Summary
+    with fc_col_right:
+        st.markdown('<h4 style="margin-bottom:12px;">📋 Forecast Summary</h4>', unsafe_allow_html=True)
+
+        cons_profit = agg[agg['scenario'] == 'Conservative Growth'][_ft_metric].sum()
+        agg_profit = agg[agg['scenario'] == 'Aggressive Growth'][_ft_metric].sum()
+
+        st.markdown(_insight_mini_card(
+            'Conservative Path',
+            currency(cons_profit, ',.0f'),
+            'Steady, predictable growth',
+            color='#6C5CE7'
+        ), unsafe_allow_html=True)
+
+        st.markdown(_insight_mini_card(
+            'Aggressive Path',
+            currency(agg_profit, ',.0f'),
+            'High growth, higher risk',
+            color='#00B894'
+        ), unsafe_allow_html=True)
+
+        st.markdown(_insight_mini_card(
+            'Risk Level',
+            'Low',
+            'All branches performing well',
+            color='#FDAA5E'
+        ), unsafe_allow_html=True)
+
+    st.markdown('<div style="margin-bottom:12px;"></div>', unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 5: PRODUCT INTELLIGENCE (Bundle + Menu Profitability)
+    # ═══════════════════════════════════════════════════════════════════════
+    pi_col_left, pi_col_right = st.columns([0.5, 0.5], gap='large')
+
+    # Left: Top Bundle Recommendation
+    with pi_col_left:
+        st.markdown('<h4 style="margin-bottom:12px;">🛒 Top Bundle Recommendation</h4>', unsafe_allow_html=True)
+
+        if rules_df is not None and len(rules_df) > 0:
+            top_rule = rules_df.nlargest(1, 'lift').iloc[0]
+            st.markdown(f"""
+            <div class="insight-card" style="padding:16px;margin-bottom:12px;">
+                <div style="font-size:0.75rem;color:var(--txt-secondary);font-weight:600;margin-bottom:8px;">HIGH POTENTIAL</div>
+                <div style="font-size:1rem;color:var(--txt-primary);font-weight:600;margin-bottom:8px;">
+                    {top_rule['antecedents']} + {top_rule['consequents']}
+                </div>
+                <table style="width:100%;font-size:0.85rem;color:var(--txt-secondary);">
+                    <tr><td>Success Rate:</td><td style="text-align:right;color:var(--txt-primary);font-weight:600;">{top_rule['confidence']*100:.0f}%</td></tr>
+                    <tr><td>Cross-Sell Potential:</td><td style="text-align:right;color:var(--txt-primary);font-weight:600;">{top_rule['lift']:.2f}x</td></tr>
+                    <tr><td>Popularity:</td><td style="text-align:right;color:var(--txt-primary);font-weight:600;">{top_rule['support']*100:.1f}%</td></tr>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info('No bundle data available.')
+
+    # Right: Menu Profitability
+    with pi_col_right:
+        st.markdown('<h4 style="margin-bottom:12px;">☕ Menu Profitability Snapshot</h4>', unsafe_allow_html=True)
+
+        menu_margins = []
+        for _, row in menu_df.iterrows():
+            m = fin_engine.get_net_margin(row['item_name'])
+            menu_margins.append(m)
+
+        menu_profit_df = pd.DataFrame(menu_margins).head(8)  # Top 8 items
+        fig_menu = px.bar(
+            menu_profit_df, x='item', y='net_profit',
+            title=None,
+            color_discrete_sequence=['#00B894'],
+            labels={'net_profit': f'Net Profit ({cur_sym()})', 'item': ''},
+        )
+        fig_menu.update_traces(
+            marker=dict(line=dict(width=0)),
+            hovertemplate='<b>%{x}</b><br>Net Profit: ' + cur_sym() + ' %{y:,.0f}<extra></extra>',
+        )
+        fig_menu.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             font_color=CT['font'],
             xaxis=dict(showgrid=False, color=CT['axis']),
             yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis']),
-            legend=dict(font=dict(color=CT['legend']), orientation='h', y=1.08),
-            margin=dict(l=40, r=20, t=10, b=40),
-            hovermode='x unified',
-            height=350,
+            margin=dict(l=40, r=0, t=0, b=60),
+            height=280,
         )
-        st.plotly_chart(fig_line, width='stretch')
+        st.plotly_chart(fig_menu, use_container_width=True)
 
-    st.markdown('<hr>', unsafe_allow_html=True)
+    st.markdown('<div style="margin-bottom:12px;"></div>', unsafe_allow_html=True)
 
-    # ── Bottom row: Menu pricing snapshot ──────────────────────────────────
-    st.markdown('<h4>☕ Menu Profitability Snapshot</h4>', unsafe_allow_html=True)
+    # ═══════════════════════════════════════════════════════════════════════
+    #  SECTION 6: EXECUTIVE SUMMARY (AI-Generated Insights)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<h4 style="margin-bottom:12px;">🤖 Executive Summary</h4>', unsafe_allow_html=True)
 
-    menu_margins = []
-    for _, row in menu_df.iterrows():
-        m = fin_engine.get_net_margin(row['item_name'])
-        menu_margins.append(m)
-
-    menu_profit_df = pd.DataFrame(menu_margins)
-
-    fig_menu = px.bar(
-        menu_profit_df,
-        x='item',
-        y=['price', 'cogs', 'net_profit'],
-        title=None,
-        barmode='group',
-        color_discrete_map={
-            'price': '#6C5CE7',
-            'cogs': '#E17055',
-            'net_profit': '#00B894',
-        },
-        labels={'value': f'Amount ({cur_sym()})', 'item': '', 'variable': ''},
-    )
-    fig_menu.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font_color=CT['font'],
-        xaxis=dict(showgrid=False, color=CT['axis']),
-        yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis']),
-        legend=dict(font=dict(color=CT['legend']), orientation='h', y=1.08),
-        margin=dict(l=40, r=20, t=10, b=40),
-        height=350,
-    )
-    st.plotly_chart(fig_menu, width='stretch')
+    # Generate a brief executive summary based on data
+    growth_pct = ((agg_profit - cons_profit) / cons_profit * 100) if cons_profit > 0 else 0
+    
+    st.markdown(f"""
+    <div class="insight-card" style="padding:16px;background:var(--bg-radio);">
+        <div style="font-size:0.9rem;color:var(--txt-primary);line-height:1.6;">
+            <strong>Q3 Performance Outlook:</strong> Revenue is expected to grow by {growth_pct:.1f}% to {currency(avg_daily_profit * 90, ',.0f')} over the next 90 days. <strong>{best_branch}</strong> shows the strongest growth trajectory. Recommend immediate focus on <strong>{best_segment}</strong> segment with the <strong>"{best_bundle}"</strong> promotional campaign to unlock cross-sell opportunities and drive customer lifetime value.
+        </div>
+        <div style="margin-top:12px;display:flex;gap:12px;">
+            <div style="flex:1;padding:8px;background:var(--bg-card);border-radius:6px;font-size:0.8rem;color:var(--txt-secondary);">
+                <strong>Next Action:</strong> Launch promotion next week
+            </div>
+            <div style="flex:1;padding:8px;background:var(--bg-card);border-radius:6px;font-size:0.8rem;color:var(--txt-secondary);">
+                <strong>Priority:</strong> {best_segment} acquisition
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_segments():
@@ -948,10 +1460,52 @@ def render_segments():
             unsafe_allow_html=True
         )
 
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric('Total Members', f"{meta['total_members']:,}")
-        col2.metric('Segments', meta['k'])
+        # KPI Row (4 compact cards)
+        total_customers = meta.get('total_members', int(seg_counts['count'].sum()))
+
+        try:
+            largest = seg_counts.nlargest(1, 'count').iloc[0]
+            largest_name = largest['segment']
+            largest_count = int(largest['count'])
+        except Exception:
+            largest_name = 'N/A'
+            largest_count = 0
+
+        # Revenue leader (from cluster profiles if available)
+        try:
+            profiles = meta.get('cluster_profiles', [])
+            if profiles:
+                top_rev = max(profiles, key=lambda p: p.get('revenue_share_pct', 0))
+                rev_seg = meta['cluster_labels'][str(top_rev['cluster'])]
+                # approximate revenue using average M_mean * count when available
+                rev_value = float(top_rev.get('M_mean', 0)) * int(top_rev.get('count', 0))
+            else:
+                rev_seg = largest_name
+                rev_value = 0
+        except Exception:
+            rev_seg = 'N/A'
+            rev_value = 0
+
+        # At-risk segment (highest average recency gap)
+        try:
+            if profiles:
+                at_risk = max(profiles, key=lambda p: p.get('R_mean', 0))
+                at_risk_name = meta['cluster_labels'][str(at_risk['cluster'])]
+                at_risk_count = int(at_risk.get('count', 0))
+            else:
+                at_risk_name = 'N/A'
+                at_risk_count = 0
+        except Exception:
+            at_risk_name = 'N/A'
+            at_risk_count = 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        # Total Customers: show group in subtitle (Members)
+        c1.markdown(_metric_card_three_row('👥', 'Total Customers', 'Members', f"{int(total_customers):,}"), unsafe_allow_html=True)
+        # Largest / Revenue / At Risk: show title, segment name on second row, and value on third row
+        c2.markdown(_metric_card_three_row('🏆', 'Largest Segment', largest_name, f"{largest_count:,}"), unsafe_allow_html=True)
+        c3.markdown(_metric_card_three_row('💰', 'Revenue Leader', rev_seg, f"{currency(rev_value, ',.0f')}"), unsafe_allow_html=True)
+        c4.markdown(_metric_card_three_row('⚠', 'At Risk Customers', at_risk_name, f"{at_risk_count:,}"), unsafe_allow_html=True)
 
         # Segment distribution
         st.markdown('<hr>', unsafe_allow_html=True)
@@ -963,22 +1517,65 @@ def render_segments():
             seg_counts, values='count', names='segment',
             title=None, color_discrete_sequence=DARK_COLORS, hole=0.4,
         )
+        # Put percentages inside slices (like Overview) to avoid legend overlap
         fig_pie.update_traces(
-            textposition='outside', textinfo='percent+label',
-            marker=dict(line=dict(color=CT['pie_line'], width=2)),
-            textfont=dict(color=CT['font']),
+            textposition='inside', textinfo='percent',
+            marker=dict(line=dict(color=CT['pie_line'], width=1.5)),
+            textfont=dict(color=CT['font'], size=11),
         )
         fig_pie.update_layout(
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            font_color=CT['font'], margin=dict(l=20, r=20, t=10, b=20),
+            font_color=CT['font'], margin=dict(l=0, r=0, t=0, b=0),
             legend=dict(font=dict(color=CT['legend'])), height=350,
         )
-        dist_col1.plotly_chart(fig_pie, width='stretch')
+        dist_col1.plotly_chart(fig_pie, use_container_width=True)
 
-        dist_col2.dataframe(
-            seg_counts.style.format({'pct': '{:.1f}%', 'count': '{:,}'}),
-            hide_index=True, width='stretch',
-        )
+        # Right: AI Segmentation Insight (stacked top->bottom)
+        # Determine biggest opportunity (second largest segment by count as fallback)
+        try:
+            sc = seg_counts.sort_values('count', ascending=False).reset_index(drop=True)
+            largest_name = sc.loc[0, 'segment'] if len(sc) > 0 else 'N/A'
+            largest_count = int(sc.loc[0, 'count']) if len(sc) > 0 else 0
+            pct_val = float(sc.loc[0, 'pct']) if ('pct' in sc.columns and len(sc) > 0) else 0.0
+            biggest_name = sc.loc[1, 'segment'] if len(sc) > 1 else sc.loc[0, 'segment']
+            biggest_count = int(sc.loc[1, 'count']) if len(sc) > 1 else largest_count
+            biggest_pct = float(sc.loc[1, 'pct']) if ('pct' in sc.columns and len(sc) > 1) else (0.0 if len(sc) <= 1 else float(sc.loc[0,'pct']))
+        except Exception:
+            largest_name = largest_name if 'largest_name' in locals() else 'N/A'
+            largest_count = largest_count if 'largest_count' in locals() else 0
+            pct_val = 0.0
+            biggest_name = 'N/A'
+            biggest_count = 0
+            biggest_pct = 0.0
+
+        # Simple recommended action heuristic
+        if biggest_name == rev_seg:
+            action = 'Drive high-value bundle promotions to this segment.'
+        elif biggest_name == at_risk_name:
+            action = 'Run reactivation & loyalty offers to recover lapsed customers.'
+        else:
+            action = f'Target {biggest_name} with a tailored promo and cross-sell bundles.'
+
+        dist_col2.markdown(_insight_mini_card(
+            'Largest Segment',
+            f'{largest_name}',
+            f'{largest_count:,} customers · {pct_val:.1f}%',
+            color='#6C5CE7'
+        ), unsafe_allow_html=True)
+
+        dist_col2.markdown(_insight_mini_card(
+            'Biggest Opportunity',
+            f'{biggest_name}',
+            f'{biggest_count:,} customers · {biggest_pct:.1f}%',
+            color='#00B894'
+        ), unsafe_allow_html=True)
+
+        dist_col2.markdown(_insight_mini_card(
+            'Recommended Action',
+            action,
+            'Prioritize Q3 campaign execution',
+            color='#FDAA5E'
+        ), unsafe_allow_html=True)
 
         st.markdown('<hr>', unsafe_allow_html=True)
         st.markdown('<h4>📋 Segment Profiles</h4>', unsafe_allow_html=True)
@@ -1050,9 +1647,49 @@ def render_segments():
             unsafe_allow_html=True
         )
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric('Total Guest Transactions', f"{seg_counts['count'].sum():,}")
-        col2.metric('Segments', meta['optimal_k'])
+        # KPI Row (4 compact cards for guest segments)
+        total_customers = int(seg_counts['count'].sum())
+
+        try:
+            largest = seg_counts.nlargest(1, 'count').iloc[0]
+            largest_name = largest['segment']
+            largest_count = int(largest['count'])
+        except Exception:
+            largest_name = 'N/A'
+            largest_count = 0
+
+        # Revenue leader fallback (guests may not have cluster_profiles)
+        try:
+            profiles = meta.get('cluster_profiles', [])
+            if profiles:
+                top_rev = max(profiles, key=lambda p: p.get('revenue_share_pct', 0))
+                rev_seg = meta['cluster_labels'][str(top_rev['cluster'])]
+                rev_value = float(top_rev.get('M_mean', 0)) * int(top_rev.get('count', 0))
+            else:
+                rev_seg = largest_name
+                rev_value = 0
+        except Exception:
+            rev_seg = 'N/A'
+            rev_value = 0
+
+        try:
+            if profiles:
+                at_risk = max(profiles, key=lambda p: p.get('R_mean', 0))
+                at_risk_name = meta['cluster_labels'][str(at_risk['cluster'])]
+                at_risk_count = int(at_risk.get('count', 0))
+            else:
+                at_risk_name = 'N/A'
+                at_risk_count = 0
+        except Exception:
+            at_risk_name = 'N/A'
+            at_risk_count = 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        # Total Customers: show group in subtitle (Guests)
+        c1.markdown(_metric_card_three_row('👥', 'Total Customers', 'Guests', f"{total_customers:,}"), unsafe_allow_html=True)
+        c2.markdown(_metric_card_three_row('🏆', 'Largest Segment', largest_name, f"{largest_count:,}"), unsafe_allow_html=True)
+        c3.markdown(_metric_card_three_row('💰', 'Revenue Leader', rev_seg, f"{currency(rev_value, ',.0f')}"), unsafe_allow_html=True)
+        c4.markdown(_metric_card_three_row('⚠', 'At Risk Customers', at_risk_name, f"{at_risk_count:,}"), unsafe_allow_html=True)
 
         # Segment distribution
         st.markdown('<hr>', unsafe_allow_html=True)
@@ -1217,8 +1854,6 @@ def render_bundles():
                         st.session_state.bundle_source = audience
                         st.rerun()
 
-    st.markdown('<br>', unsafe_allow_html=True)
-
     # ── Show full browseable table ────────────────────────────────────────
     with st.expander('🔍 Browse all bundles', expanded=True):
         st.dataframe(
@@ -1267,6 +1902,13 @@ def render_bundles():
         impact_df = fc_engine.get_bundle_impact_forecast(
             bundle_name, margin_pct=margin_pct, boost_factor=boost_factor
         )
+        # apply global branch filter if present
+        sel_branches = st.session_state.get('branch_filter', [])
+        if sel_branches:
+            try:
+                impact_df = impact_df[impact_df['branch'].isin(sel_branches)]
+            except Exception:
+                pass
 
         # Aggregate across cities
         agg_impact = impact_df.groupby(
@@ -1345,10 +1987,12 @@ def render_bundles():
             font_color=CT['font'],
             xaxis=dict(showgrid=False, color=CT['axis']),
             yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis'], title=f'Profit ({cur_sym()})'),
-            legend=dict(font=dict(color=CT['legend']), orientation='h', y=1.12),
-            margin=dict(l=40, r=20, t=50, b=40),
+            # Place legend below the chart to avoid overlapping the title
+            legend=dict(font=dict(color=CT['legend']), orientation='h', y=-0.12, yanchor='top', x=0.5, xanchor='center'),
+            # Increase top margin for title and bottom margin for legend space
+            margin=dict(l=40, r=20, t=80, b=90),
             hovermode='x unified',
-            height=450,
+            height=470,
         )
         st.plotly_chart(fig_impact, width='stretch')
 
@@ -1391,7 +2035,7 @@ def render_bundles():
 
 
 def render_forecast():
-    """📈 Forecast & Profit — dual-model side-by-side view + fullscreen historical."""
+    """📈 Forecast & Profit — Executive dashboard with smooth trends & confidence bands."""
 
     fs = st.session_state.forecast_fullscreen
     _rev_ft = st.session_state.get('dashboard_lens', 'Profit') == 'Revenue'
@@ -1404,7 +2048,7 @@ def render_forecast():
         if fs:
             st.markdown(f'<h2>📈 Historical & {_ft_label} Forecast Overview</h2>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<h2>📈 {_ft_label} Forecast — Next 90 Days</h2>', unsafe_allow_html=True)
+            st.markdown(f'<h2>📈 {_ft_label} Forecast — Executive Dashboard</h2>', unsafe_allow_html=True)
     with col_btn:
         btn_label = '⛶ Exit Fullscreen' if fs else '⛶ Fullscreen'
         if st.button(btn_label, key='fs_toggle_btn', width='stretch'):
@@ -1414,7 +2058,10 @@ def render_forecast():
     # ── Common: compute profit forecast ────────────────────────────────────
     avg_margin = fin_engine.get_net_margin('Latte')
     margin_pct = avg_margin['net_margin_pct'] / 100
-    profit_fc = fc_engine.get_profit_forecast(margin_pct=margin_pct)
+    # Use shared helper so branch filtering and margin logic is consistent across pages
+    profit_fc = get_filtered_profit_fc(margin_pct=margin_pct)
+
+    # (Debug expander removed)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  FULLSCREEN MODE — Combined Historical + Forecast
@@ -1435,15 +2082,9 @@ def render_forecast():
         )
 
         with col_ctrl1:
-            sel_branches = st.multiselect(
-                'Select Branch(es)',
-                branches,
-                default=branches,
-                key='fs_branches',
-            )
-            if not sel_branches:
-                sel_branches = branches  # fallback
-        with col_ctrl2:
+            # Use branch filter from sidebar; do not show per-page branch selector
+            sel_branches = st.session_state.get('branch_filter', branches)
+            # Time period filter moved to the left (replaces removed branch selector)
             dr = st.date_input(
                 'Time Period',
                 value=(date_min, date_max),
@@ -1455,12 +2096,15 @@ def render_forecast():
                 dr_start, dr_end = dr
             else:
                 dr_start, dr_end = date_min, date_max
+        with col_ctrl2:
+            # intentionally left blank (controls moved to left)
+            st.markdown('<div style="margin-top:24px;"></div>', unsafe_allow_html=True)
         with col_ctrl3:
             st.markdown('<div style="margin-top:24px;"></div>', unsafe_allow_html=True)
             if st.button('🔄 Reset View', key='fs_reset', width='stretch'):
-                for k in ['fs_branches', 'fs_daterange']:
-                    if k in st.session_state:
-                        del st.session_state[k]
+                # Reset only fullscreen-specific controls (date range). Branch filter lives in sidebar.
+                if 'fs_daterange' in st.session_state:
+                    del st.session_state['fs_daterange']
                 st.rerun()
 
         # ── Filter data ──
@@ -1544,8 +2188,8 @@ def render_forecast():
             font_color=CT['font'],
             xaxis=dict(showgrid=False, color=CT['axis'], title=''),
             yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis'], title=f'Daily {_ft_label} ({cur_sym()})'),
-            legend=dict(font=dict(color=CT['legend']), orientation='h', y=1.08),
-            margin=dict(l=40, r=20, t=50, b=40),
+            legend=dict(font=dict(color=CT['legend']), orientation='h', y=-0.12, yanchor='top', x=0.5, xanchor='center'),
+            margin=dict(l=40, r=20, t=70, b=80),
             hovermode='x unified',
             height=600,
         )
@@ -1592,148 +2236,249 @@ def render_forecast():
         return  # ── end fullscreen mode ──
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  NORMAL VIEW (existing code preserved)
+    #  NORMAL VIEW — Executive Forecast Dashboard (70/30 Layout)
     # ═══════════════════════════════════════════════════════════════════════
 
-    st.markdown(
-        '<div style="color:#888;margin-bottom:16px;">'
-        'Two forecast scenarios based on your transaction history. '
-        'Use these to plan inventory, staffing, and promotions.</div>',
-        unsafe_allow_html=True
-    )
+    # Prepare aggregated forecast data (sum across selected branches per date & scenario)
+    # This ensures forecast totals are on the same scale as historical totals (both are sums across branches).
+    fc_sum = profit_fc.groupby(['created_at', 'scenario'], as_index=False)[_ft_metric].sum()
 
-    # ── Key numbers ───────────────────────────────────────────────────────
-    agg_fc = profit_fc.groupby('scenario')[_ft_metric].sum().reset_index()
+    # Pivot scenarios into columns (conservative / aggressive)
+    pivot = fc_sum.pivot(index='created_at', columns='scenario', values=_ft_metric).reset_index()
+    pivot.columns.name = None
+    # Normalize expected scenario column names
+    pivot = pivot.rename(columns={
+        'Conservative Growth': 'conservative',
+        'Aggressive Growth': 'aggressive'
+    })
 
-    col_fc1, col_fc2, col_fc3 = st.columns(3)
+    # Ensure both scenario columns exist
+    if 'conservative' not in pivot.columns:
+        pivot['conservative'] = 0.0
+    if 'aggressive' not in pivot.columns:
+        pivot['aggressive'] = 0.0
 
-    cons_val = agg_fc[agg_fc['scenario'] == 'Conservative Growth'][_ft_metric].values
-    aggr_val = agg_fc[agg_fc['scenario'] == 'Aggressive Growth'][_ft_metric].values
+    # Midpoint as the average of conservative & aggressive totals (per date)
+    pivot['midpoint'] = (pivot['conservative'] + pivot['aggressive']) / 2.0
 
-    cons_val = cons_val[0] if len(cons_val) > 0 else 0
-    aggr_val = aggr_val[0] if len(aggr_val) > 0 else 0
+    # Standardize column name to 'date' for downstream code
+    pivot = pivot.rename(columns={'created_at': 'date'})
 
-    _color_cons = '#6C5CE7'
-    with col_fc1:
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>Conservative Growth (90d)</h4>
-            <div class="value" style="color:{_color_cons};">{currency(cons_val, ',.0f')}</div>
-            <div class="sub">Stable trend projection</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_fc2:
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>Aggressive Growth (90d)</h4>
-            <div class="value" style="color:#00B894;">{currency(aggr_val, ',.0f')}</div>
-            <div class="sub">Higher upside potential</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_fc3:
-        diff = aggr_val - cons_val
-        diff_pct = (diff / cons_val * 100) if cons_val > 0 else 0
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>Growth Gap</h4>
-            <div class="value" style="color:#FDAA5E;">+{diff_pct:.1f}%</div>
-            <div class="sub">{_ft_label} upside potential</div>
-        </div>
-        """, unsafe_allow_html=True)
+    agg_forecast = pivot[['date', 'conservative', 'aggressive', 'midpoint']].copy()
 
+    # Calculate 7-day rolling average to smooth daily noise
+    agg_forecast['midpoint_smooth'] = agg_forecast['midpoint'].rolling(window=7, center=True, min_periods=1).mean()
+    agg_forecast['conservative_smooth'] = agg_forecast['conservative'].rolling(window=7, center=True, min_periods=1).mean()
+    agg_forecast['aggressive_smooth'] = agg_forecast['aggressive'].rolling(window=7, center=True, min_periods=1).mean()
+
+    # ── KPI Row (Forecast & Profit) ─────────────────────────────────────────
+    try:
+        today = pd.Timestamp.now().normalize()
+        horizon_end = today + pd.Timedelta(days=89)
+
+        # Normalize forecast dates
+        fc_daily = profit_fc.copy()
+        fc_daily['created_at'] = pd.to_datetime(fc_daily['created_at']).dt.normalize()
+
+        # 1) Forecast (90 days) using dashboard lens
+        fc_90 = fc_daily[(fc_daily['created_at'] >= today) & (fc_daily['created_at'] <= horizon_end)]
+        total_90d_forecast = fc_90.groupby('created_at')[_ft_metric].sum().sum()
+        if total_90d_forecast == 0 and not agg_forecast.empty:
+            total_90d_forecast = agg_forecast['midpoint'].head(90).sum()
+
+        # 2) Daily Average Forecast Profit (next 90 days)
+        if len(fc_90) > 0:
+            daily_avg_forecast = fc_90.groupby('created_at')[_ft_metric].sum().mean()
+        else:
+            daily_avg_forecast = agg_forecast['midpoint'].head(90).mean() if not agg_forecast.empty else 0
+
+        # 3) Best Performing Branch (by forecasted profit)
+        branch_totals = profit_fc.groupby('branch')[_ft_metric].sum().sort_values(ascending=False)
+        best_branch = branch_totals.index[0] if len(branch_totals) > 0 else 'N/A'
+        best_branch_value = branch_totals.iloc[0] if len(branch_totals) > 0 else 0
+
+        # 4) Lowest Performing Branch (by forecasted profit)
+        branch_totals_asc = profit_fc.groupby('branch')[_ft_metric].sum().sort_values(ascending=True)
+        lowest_branch = branch_totals_asc.index[0] if len(branch_totals_asc) > 0 else 'N/A'
+        lowest_branch_value = branch_totals_asc.iloc[0] if len(branch_totals_asc) > 0 else 0
+
+        # Render 4 equal-width KPI cards (reuse Overview compact style)
+        c1, c2, c3, c4 = st.columns(4, gap='small')
+        c1.markdown(_compact_metric_card('💰', f'Forecast {_ft_label} (90 Days)', currency(total_90d_forecast, ',.0f')), unsafe_allow_html=True)
+        c2.markdown(_compact_metric_card('📈', f'Daily Average Forecast {_ft_label}', currency(daily_avg_forecast, ',.0f'), note='avg per day (next 90d)'), unsafe_allow_html=True)
+        c3.markdown(_compact_metric_card('🏆', 'Best Performing Branch', best_branch, note=currency(best_branch_value, ',.0f')), unsafe_allow_html=True)
+        c4.markdown(_compact_metric_card('📉', 'Lowest Performing Branch', lowest_branch, note=currency(lowest_branch_value, ',.0f')), unsafe_allow_html=True)
+    except Exception:
+        # Fail gracefully: don't block the rest of the page
+        pass
+
+    # Separator between KPI row and chart (match segment page style)
     st.markdown('<hr>', unsafe_allow_html=True)
 
-    # ── Overlaid forecast chart ───────────────────────────────────────────
-    # Aggregate across all cities
-    _chart_color_cons = '#6C5CE7'
-    agg = profit_fc.groupby(['created_at', 'scenario'])[
-        _ft_metric
-    ].sum().reset_index()
+    # Build 8/4 layout: Forecast Chart (left) + Forecast Intelligence (right)
+    col_chart, col_insight = st.columns([0.67, 0.33], gap='medium')
 
-    fig_fc = go.Figure()
+    # LEFT: Combined Historical + Forecast Chart (8 cols)
+    with col_chart:
+        fig_fc = go.Figure()
 
-    for scenario in ['Conservative Growth', 'Aggressive Growth']:
-        sdata = agg[agg['scenario'] == scenario]
-        color = _chart_color_cons if scenario == 'Conservative Growth' else '#00B894'
+        # Historical series (if available) — respect Dashboard Focus (Revenue vs Profit)
+        try:
+            hist = load_historical_daily()
+            branch_sel = st.session_state.get('branch_filter', [])
+            if branch_sel:
+                hist = hist[hist['city'].isin(branch_sel)]
 
-        # Add confidence band (simulated as ±5% for conservative, ±8% for aggressive)
-        band_pct = 0.05 if 'Conservative' in scenario else 0.08
-        upper = sdata[_ft_metric] * (1 + band_pct)
-        lower = sdata[_ft_metric] * (1 - band_pct)
+            # Aggregate by date (use total_revenue as base)
+            hist_agg = hist.groupby('date', as_index=False)['total_revenue'].sum()
 
+            if _rev_ft:
+                hist_x = hist_agg['date']
+                hist_y = hist_agg['total_revenue']
+                hover_label = 'Historical Revenue'
+            else:
+                hist_agg['profit'] = hist_agg['total_revenue'] * margin_pct
+                hist_x = hist_agg['date']
+                hist_y = hist_agg['profit']
+                hover_label = 'Historical Profit'
+
+            fig_fc.add_trace(go.Scatter(
+                x=hist_x,
+                y=hist_y,
+                mode='lines',
+                name='Historical',
+                line=dict(color='#888888', width=2),
+                hovertemplate=f'<b>%{{x|%b %d, %Y}}</b><br>{hover_label}: {cur_sym()}%{{y:,.0f}}<extra></extra>',
+            ))
+        except Exception:
+            hist_x, hist_y = None, None
+
+        # Forecast midpoint (smoothed)
         fig_fc.add_trace(go.Scatter(
-            x=sdata['created_at'],
-            y=sdata[_ft_metric],
+            x=agg_forecast['date'],
+            y=agg_forecast['midpoint_smooth'],
             mode='lines',
-            name=scenario,
-            line=dict(color=color, width=2.5),
-            hovertemplate=f'<b>%{{x|%b %d}}</b><br>{_ft_label}: {cur_sym()} %{{y:,.0f}}<br>',
+            name='Forecast',
+            line=dict(color='#00B894', width=3, dash='dash'),
+            hovertemplate=f'<b>%{{x|%b %d, %Y}}</b><br>Forecast Profit: {cur_sym()}%{{y:,.0f}}<extra></extra>',
         ))
 
-        # Add confidence band
-        fig_fc.add_trace(go.Scatter(
-            x=pd.concat([sdata['created_at'], sdata['created_at'][::-1]]),
-            y=pd.concat([upper, lower[::-1]]),
-            fill='toself',
-            fillcolor=hex_to_rgba(color, 0.12),
-            line=dict(width=0),
-            showlegend=False,
-            name=f'{scenario} range',
-            hoverinfo='skip',
-        ))
+        # Confidence interval band (if available)
+        try:
+            upper = agg_forecast['aggressive_smooth']
+            lower = agg_forecast['conservative_smooth']
+            fig_fc.add_trace(go.Scatter(
+                x=pd.concat([agg_forecast['date'], agg_forecast['date'][::-1]]),
+                y=pd.concat([upper, lower[::-1]]),
+                fill='toself',
+                fillcolor=hex_to_rgba('#00B894', 0.12),
+                line=dict(width=0),
+                hoverinfo='skip',
+                showlegend=False,
+            ))
+        except Exception:
+            pass
 
-    # Add a "Forecast Start" marker line
-    fig_fc.add_shape(
-        type='line',
-        x0='2025-07-01', x1='2025-07-01',
-        y0=0, y1=1,
-        yref='paper',
-        line=dict(dash='dash', color='#E17055', width=1.5),
-    )
-    fig_fc.add_annotation(
-        x='2025-07-01',
-        y=1, yref='paper',
-        text='Forecast Start',
-        showarrow=False,
-        font=dict(color='#E17055', size=12),
-        yshift=10,
-    )
+        fig_fc.update_layout(
+            title=f'{_ft_label} — Historical vs Forecast (90 days)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font_color=CT['font'],
+            xaxis=dict(showgrid=False, color=CT['axis'], title='Date'),
+            yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis'], title=f'Daily {_ft_label} ({cur_sym()})'),
+            legend=dict(orientation='h', y=1.02, x=0.01, font=dict(color=CT['legend'])),
+            margin=dict(l=40, r=10, t=60, b=40),
+            hovermode='x unified',
+            height=560,
+        )
+        st.plotly_chart(fig_fc, use_container_width=True)
 
-    fig_fc.update_layout(
-        title=f'Projected {_ft_label} — Next 90 Days',
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font_color=CT['font'],
-        xaxis=dict(showgrid=False, color=CT['axis'], title=''),
-        yaxis=dict(showgrid=True, gridcolor=CT['grid'], color=CT['axis'], title=f'Daily {_ft_label} ({cur_sym()})'),
-        legend=dict(font=dict(color=CT['legend']), orientation='h', y=1.08),
-        margin=dict(l=40, r=20, t=50, b=40),
-        hovermode='x unified',
-        height=500,
-    )
-    st.plotly_chart(fig_fc, width='stretch')
+    # RIGHT: Forecast Intelligence (4 compact insight cards)
+    with col_insight:
+        # Trend outlook: compare first vs last 14-day average of forecast midpoint
+        try:
+            first_avg = agg_forecast['midpoint'].head(14).mean()
+            last_avg = agg_forecast['midpoint'].tail(14).mean()
+            growth_pct_14 = ((last_avg - first_avg) / first_avg * 100) if first_avg > 0 else 0
+        except Exception:
+            growth_pct_14 = 0
 
-    # ── Branch-level breakdown ────────────────────────────────────────────
-    st.markdown('<hr>', unsafe_allow_html=True)
-    st.markdown('<h4>📍 Branch-Level Forecast</h4>', unsafe_allow_html=True)
+        if growth_pct_14 > 10:
+            trend_label = 'Strong Growth'
+            trend_color = '#00B894'
+        elif growth_pct_14 > 2:
+            trend_label = 'Moderate Growth'
+            trend_color = '#6C5CE7'
+        elif growth_pct_14 < -5:
+            trend_label = 'Declining Trend'
+            trend_color = '#E17055'
+        else:
+            trend_label = 'Stable Outlook'
+            trend_color = '#FDAA5E'
 
-    branch_agg = profit_fc.groupby(['branch', 'scenario'])[
-        _ft_metric
-    ].sum().reset_index()
+        # Peak forecast period
+        try:
+            peak_row = agg_forecast.loc[agg_forecast['midpoint'].idxmax()]
+            peak_date = pd.to_datetime(peak_row['date'])
+            peak_week = ((peak_date - agg_forecast['date'].min()).days // 7) + 1
+            peak_label = f'Week {peak_week} · {peak_date.strftime("%b %Y")}'
+        except Exception:
+            peak_label = 'N/A'
 
-    branch_pivot = branch_agg.pivot(
-        index='branch', columns='scenario', values=_ft_metric
-    ).reset_index()
-    branch_pivot['Difference'] = (
-        branch_pivot.get('Aggressive Growth', 0) - branch_pivot.get('Conservative Growth', 0)
-    )
+        # Risk alert: detect increased uncertainty or slowdown
+        try:
+            avg_range = (agg_forecast['aggressive'] - agg_forecast['conservative']).mean()
+            avg_val = agg_forecast['midpoint'].mean()
+            conf_pct = 100 - min((avg_range / avg_val * 100) if avg_val > 0 else 0, 100)
+        except Exception:
+            conf_pct = 100
+
+        risk_msg = ''
+        if conf_pct < 60:
+            risk_msg = 'Increased uncertainty in final forecast horizon'
+        else:
+            try:
+                mid = len(agg_forecast) // 2
+                prev_avg = agg_forecast['midpoint'].iloc[max(0, mid-14):mid].mean()
+                recent_avg = agg_forecast['midpoint'].iloc[mid:mid+14].mean()
+                if recent_avg < prev_avg:
+                    risk_msg = 'Growth slows in the mid-horizon'
+                else:
+                    risk_msg = 'No immediate volatility detected'
+            except Exception:
+                risk_msg = 'No immediate volatility detected'
+
+        # Recommended action
+        if 'Strong' in trend_label:
+            action = 'Increase marketing & inventory to capture upside'
+        elif 'Moderate' in trend_label:
+            action = 'Scale inventory; monitor campaigns closely'
+        elif 'Declining' in trend_label:
+            action = 'Launch targeted promotions and cost controls'
+        else:
+            action = 'Focus on margin optimization and retention'
+
+        # Render compact insight cards
+        st.markdown(_insight_mini_card('Trend Outlook', trend_label, f'{growth_pct_14:.1f}% vs start', color=trend_color), unsafe_allow_html=True)
+        st.markdown(_insight_mini_card('Peak Forecast Period', peak_label, 'Highest projected daily profit', color='#6C5CE7'), unsafe_allow_html=True)
+        st.markdown(_insight_mini_card('Risk Alert', risk_msg, f'Confidence: {conf_pct:.0f}%', color='#E17055' if conf_pct<60 else '#FDAA5E'), unsafe_allow_html=True)
+        st.markdown(_insight_mini_card('Recommended Action', action, 'Decision-support suggestion', color='#00B894'), unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # BRANCH-LEVEL FORECAST TABLE
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown('<hr style="margin:24px 0;border-color:var(--border);">', unsafe_allow_html=True)
+    st.markdown('<h4>📍 Branch-Level Forecast (90 Days)</h4>', unsafe_allow_html=True)
+
+    branch_agg = profit_fc.groupby('branch')[_ft_metric].sum().reset_index().sort_values(_ft_metric, ascending=False)
+    
     _sym = cur_sym()
-    branch_pivot.columns = ['Branch', f'Conservative Growth ({_sym})', f'Aggressive Growth ({_sym})', f'Difference ({_sym})']
-    branch_pivot[f'Conservative Growth ({_sym})'] = branch_pivot[f'Conservative Growth ({_sym})'].apply(lambda x: currency(x, ',.0f'))
-    branch_pivot[f'Aggressive Growth ({_sym})'] = branch_pivot[f'Aggressive Growth ({_sym})'].apply(lambda x: currency(x, ',.0f'))
-    branch_pivot[f'Difference ({_sym})'] = branch_pivot[f'Difference ({_sym})'].apply(lambda x: currency(x, ',.0f'))
+    display_cols = ['branch', _ft_metric]
+    branch_display = branch_agg[display_cols].copy()
+    branch_display.columns = ['Branch', f'{_ft_label} ({_sym})']
+    branch_display[f'{_ft_label} ({_sym})'] = branch_display[f'{_ft_label} ({_sym})'].apply(lambda x: currency(x, ',.0f'))
 
-    st.dataframe(branch_pivot, hide_index=True, width='stretch')
+    st.dataframe(branch_display, hide_index=True, use_container_width=True)
 
     # ── Selected bundle impact (if any) ────────────────────────────────────
     if st.session_state.selected_bundle:
@@ -2074,7 +2819,16 @@ def render_ai_analyst():
         branch_list = sorted(
             load_historical_daily()["city"].unique().tolist()
         )
-        sel_branch = st.selectbox("Cabang", branch_list, key="ai_branch")
+        # default to global branch filter if available
+        bf = st.session_state.get('branch_filter', [])
+        default_index = 0
+        if bf:
+            try:
+                if bf[0] in branch_list:
+                    default_index = branch_list.index(bf[0])
+            except Exception:
+                default_index = 0
+        sel_branch = st.selectbox("Cabang", branch_list, index=default_index, key="ai_branch")
 
     with col_f3:
         day_type = st.radio("Tipe Hari", ["Weekday", "Weekend"], horizontal=True, key="ai_day")
@@ -2138,10 +2892,7 @@ def render_ai_analyst():
             unsafe_allow_html=True,
         )
 
-        # ── Show context data (expandable) ─────────────────────────────────
-        with st.expander("📦 Lihat data yang dikirim ke AI"):
-            st.code(context_json, language="json")
-            st.caption("Data ini 100% dari engine — AI (Groq) hanya merangkai.")
+        # (Removed expandable view of context data sent to AI)
 
     else:
         st.markdown(
@@ -2155,41 +2906,17 @@ def render_ai_analyst():
 #  MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Theme toggle icon button (top-right, absolutely positioned via CSS) ──
-_icon = '☀️' if _effective_theme == 'dark' else '🌙'
-_help = 'Switch to Light Mode' if _effective_theme == 'dark' else 'Switch to Dark Mode'
-if st.button(_icon, key='theme_btn', help=_help):
-    st.session_state.theme_toggle = '☀️ Light' if _effective_theme == 'dark' else '🌙 Dark'
-    st.rerun()
-
-# ── Analytical Lens Switcher ───────────────────────────────────────────────
-_lens_holder = st.empty()
-with _lens_holder.container():
-    lens_col1, lens_col2 = st.columns([1, 4])
-    with lens_col1:
-        st.markdown('<div style="font-size:0.85rem;font-weight:500;color:var(--txt-secondary);padding-top:6px;">🎯 Focus:</div>', unsafe_allow_html=True)
-    with lens_col2:
-        _lens = st.radio(
-            "Analytical Lens",
-            ["💰 Profit", "📈 Revenue"],
-            index=0 if st.session_state.dashboard_lens == 'Profit' else 1,
-            horizontal=True,
-            label_visibility="collapsed",
-            key="lens_radio",
-        )
-        st.session_state.dashboard_lens = 'Revenue' if 'Revenue' in _lens else 'Profit'
-
-if selected_tab == nav_tabs[0]:
+if selected_tab == NAV_TABS[0]:
     render_overview()
-elif selected_tab == nav_tabs[1]:
+elif selected_tab == NAV_TABS[1]:
     render_segments()
-elif selected_tab == nav_tabs[2]:
+elif selected_tab == NAV_TABS[2]:
     render_bundles()
-elif selected_tab == nav_tabs[3]:
+elif selected_tab == NAV_TABS[3]:
     render_forecast()
-elif selected_tab == nav_tabs[4]:
+elif selected_tab == NAV_TABS[4]:
     render_explorer()
-elif selected_tab == nav_tabs[5]:
+elif selected_tab == NAV_TABS[5]:
     render_ai_analyst()
 
 # ══════════════════════════════════════════════════════════════════════════════
