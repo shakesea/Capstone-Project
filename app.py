@@ -421,23 +421,35 @@ def load_segment_counts(path, col='segment_name'):
 
 @st.cache_data
 def load_menu():
-    # Provide a clear error when the parquet file is missing on the deployment host.
+    # Try the cleaned menu first; if missing, fall back to raw `menu_items.parquet` if available.
+    ALT_MENU = BASE / 'menu_items.parquet'
     try:
-        if not MENU_DATA.exists():
-            # Friendly runtime message for Streamlit logs/UI and explicit exception for tracebacks
+        if MENU_DATA.exists():
+            return pd.read_parquet(MENU_DATA)
+
+        # Fallback: use raw menu items file if present
+        if ALT_MENU.exists():
             msg = (
-                f"Required data file '{MENU_DATA.name}' not found in application directory. "
-                "Please add this file to the repository or update the path so the app can access it."
+                f"File '{MENU_DATA.name}' not found; falling back to '{ALT_MENU.name}'.\n"
+                "Consider adding a cleaned menu file to the repository for consistent results."
             )
             try:
-                # If running inside Streamlit, show a message in the app UI.
-                st.error(msg)
+                st.warning(msg)
             except Exception:
                 pass
-            raise FileNotFoundError(msg)
-        return pd.read_parquet(MENU_DATA)
+            return pd.read_parquet(ALT_MENU)
+
+        # Neither file exists — surface a clear error for logs/UI
+        msg = (
+            f"Required data file '{MENU_DATA.name}' not found in application directory, and fallback '{ALT_MENU.name}' is also missing. "
+            "Please add one of these files to the repository or update the path so the app can access it."
+        )
+        try:
+            st.error(msg)
+        except Exception:
+            pass
+        raise FileNotFoundError(msg)
     except Exception as e:
-        # Surface helpful context in logs and re-raise to allow Streamlit to record the full traceback
         try:
             st.exception(e)
         except Exception:
