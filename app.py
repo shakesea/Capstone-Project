@@ -421,7 +421,28 @@ def load_segment_counts(path, col='segment_name'):
 
 @st.cache_data
 def load_menu():
-    return pd.read_parquet(MENU_DATA)
+    # Provide a clear error when the parquet file is missing on the deployment host.
+    try:
+        if not MENU_DATA.exists():
+            # Friendly runtime message for Streamlit logs/UI and explicit exception for tracebacks
+            msg = (
+                f"Required data file '{MENU_DATA.name}' not found in application directory. "
+                "Please add this file to the repository or update the path so the app can access it."
+            )
+            try:
+                # If running inside Streamlit, show a message in the app UI.
+                st.error(msg)
+            except Exception:
+                pass
+            raise FileNotFoundError(msg)
+        return pd.read_parquet(MENU_DATA)
+    except Exception as e:
+        # Surface helpful context in logs and re-raise to allow Streamlit to record the full traceback
+        try:
+            st.exception(e)
+        except Exception:
+            pass
+        raise
 
 @st.cache_data
 def load_transaction_sample():
