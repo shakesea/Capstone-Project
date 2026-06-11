@@ -15,6 +15,7 @@ __pycache__/
 *.pkl
 *.json
 *.txt
+.streamlit/secrets.toml
 # Intentionally omitted: *.md would exclude README.md and SourceOfTruth.md
 # If you need to exclude generated markdown, use a more specific pattern like:
 # reports/*.md
