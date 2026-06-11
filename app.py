@@ -387,8 +387,29 @@ TRANS_FEATURES = BASE / 'df_transaction_features.parquet'
 
 @st.cache_data
 def load_json(path):
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    # Robust loader: when JSON file is missing on the deployment host, return empty dict
+    try:
+        if not Path(path).exists():
+            msg = f"Optional JSON file '{Path(path).name}' not found; continuing with empty defaults."
+            try:
+                st.warning(msg)
+            except Exception:
+                pass
+            return {}
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        try:
+            st.error(f"Failed to parse JSON file {Path(path).name}: {e}")
+        except Exception:
+            pass
+        return {}
+    except Exception as e:
+        try:
+            st.exception(e)
+        except Exception:
+            pass
+        return {}
 
 @st.cache_data
 def load_parquet(path):
