@@ -296,5 +296,6 @@ K-MeansNonMember.ipynb + aprioriNonMember.ipynb
 Legacy notebooks `07.ipynb`, `08-Benchmark-Models.ipynb`, `09_Hybrid_Forecast_HW_XGB.ipynb`, and `09-testingXgb.ipynb` are superseded by `06_Modeling_and_Evaluation.ipynb` and retained for reference only.
 
 Ensure `function.py` is in the same directory. Internet connectivity and Kaggle API credentials are required for `01-LoadData.ipynb`.
-#   C a p s t o n e - P r o j e c t  
+#   C a p s t o n e - P r o j e c t 
+ 
  
