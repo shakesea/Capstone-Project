@@ -481,24 +481,54 @@ def load_menu():
 def load_transaction_sample():
     """Load a sample of transaction features for avg calculations."""
     import pyarrow.parquet as pq
-    tbl = pq.read_table(str(TRANS_FEATURES), columns=['final_amount', 'basket_size', 'discount_applied'])
-    # Take a representative sample
-    sample = tbl.slice(0, 500000)
-    return sample.to_pandas()
+    # If the parquet file is missing on the host, return an empty dataframe
+    if not TRANS_FEATURES.exists():
+        try:
+            st.warning(f"Optional data file '{TRANS_FEATURES.name}' not found; using fallback sample.")
+        except Exception:
+            pass
+        return pd.DataFrame(columns=['final_amount', 'basket_size', 'discount_applied'])
+
+    try:
+        tbl = pq.read_table(str(TRANS_FEATURES), columns=['final_amount', 'basket_size', 'discount_applied'])
+        # Take a representative sample
+        sample = tbl.slice(0, 500000)
+        return sample.to_pandas()
+    except Exception as e:
+        try:
+            st.warning(f"Failed to read '{TRANS_FEATURES.name}': {e}. Using fallback empty sample.")
+        except Exception:
+            pass
+        return pd.DataFrame(columns=['final_amount', 'basket_size', 'discount_applied'])
 
 @st.cache_data
 def load_historical_daily():
     """Daily transaction counts + revenue aggregated by city (2023-07 to 2025-06)."""
     import pyarrow.parquet as pq
-    tbl = pq.read_table(str(TRANS_FEATURES), columns=['city', 'created_at', 'final_amount'])
-    df = tbl.to_pandas()
-    df['date'] = pd.to_datetime(df['created_at']).dt.normalize()
-    daily = df.groupby(['date', 'city'], as_index=False).agg(
-        total_transactions=('final_amount', 'count'),
-        total_revenue=('final_amount', 'sum'),
-    )
-    daily = daily.sort_values(['date', 'city']).reset_index(drop=True)
-    return daily
+    # If the transactions features parquet is missing, return empty dataframe
+    if not TRANS_FEATURES.exists():
+        try:
+            st.warning(f"Optional data file '{TRANS_FEATURES.name}' not found; returning empty daily history.")
+        except Exception:
+            pass
+        return pd.DataFrame(columns=['date', 'city', 'total_transactions', 'total_revenue'])
+
+    try:
+        tbl = pq.read_table(str(TRANS_FEATURES), columns=['city', 'created_at', 'final_amount'])
+        df = tbl.to_pandas()
+        df['date'] = pd.to_datetime(df['created_at']).dt.normalize()
+        daily = df.groupby(['date', 'city'], as_index=False).agg(
+            total_transactions=('final_amount', 'count'),
+            total_revenue=('final_amount', 'sum'),
+        )
+        daily = daily.sort_values(['date', 'city']).reset_index(drop=True)
+        return daily
+    except Exception as e:
+        try:
+            st.warning(f"Failed to read '{TRANS_FEATURES.name}' for historical daily: {e}. Returning empty daily history.")
+        except Exception:
+            pass
+        return pd.DataFrame(columns=['date', 'city', 'total_transactions', 'total_revenue'])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,8 +676,28 @@ class ForecastEngine:
             self.full['created_at'] = pd.to_datetime(self.full['created_at'])
 
         # Derive average transaction value from historical data
-        tx_sample = load_transaction_sample()
-        self.avg_transaction_value = float(tx_sample['final_amount'].mean())
+        try:
+            tx_sample = load_transaction_sample()
+            if tx_sample is None or tx_sample.empty or 'final_amount' not in tx_sample.columns:
+                raise FileNotFoundError('transaction sample not available')
+            avg_val = tx_sample['final_amount'].mean()
+            if pd.isna(avg_val):
+                raise ValueError('computed avg is NaN')
+            self.avg_transaction_value = float(avg_val)
+        except Exception:
+            # Fallback: use menu average price from FinancialEngine if available
+            try:
+                self.avg_transaction_value = float(fin_engine.avg_price)
+                try:
+                    st.warning('Using menu average price as fallback for average transaction value.')
+                except Exception:
+                    pass
+            except Exception:
+                self.avg_transaction_value = 0.0
+                try:
+                    st.warning('Could not derive average transaction value; defaulting to 0.0.')
+                except Exception:
+                    pass
 
     def get_profit_forecast(self, margin_pct=0.25):
         """
