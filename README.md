@@ -6,14 +6,14 @@ End-to-end data pipeline analyzing transaction data from the **G Coffee** chain 
 
 ## 1. Project Overview
 
-| Aspect          | Description                                                                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Objective**   | Clean, integrate, and engineer features from 7 raw CSV tables into master datasets for customer segmentation, basket analysis, and transaction forecasting. |
-| **Domain**      | Retail coffee shop chain — 10 outlets, 8 beverage items, >14.6M transactions.                                                                               |
-| **Data Source** | Kaggle — [G Coffee Shop Transaction 202307 to 202506](https://www.kaggle.com/datasets/geraldooizx/g-coffee-shop-transaction-202307-to-202506)               |
-| **Time Span**   | 1 July 2023 – 30 June 2025 (2 years)                                                                                                                        |
-| **Volume**      | ~14.6M transactions, ~29.2M line items, ~2.2M registered users                                                                                              |
-| **Currency**    | Ringgit Malaysia (RM) — converted in-memory to IDR (1 RM = Rp 3,500) during EDA only. All parquet files store RM.                                           |
+| Aspect | Description |
+|--------|-------------|
+| **Objective** | Clean, integrate, and engineer features from 7 raw CSV tables into master datasets for customer segmentation, basket analysis, and transaction forecasting. |
+| **Domain** | Retail coffee shop chain — 10 outlets, 8 beverage items, >14.6M transactions. |
+| **Data Source** | Kaggle — [G Coffee Shop Transaction 202307 to 202506](https://www.kaggle.com/datasets/geraldooizx/g-coffee-shop-transaction-202307-to-202506) |
+| **Time Span** | 1 July 2023 – 30 June 2025 (2 years) |
+| **Volume** | ~14.6M transactions, ~29.2M line items, ~2.2M registered users |
+| **Currency** | Ringgit Malaysia (RM) — converted in-memory to IDR (1 RM = Rp 3,500) during EDA only. All parquet files store RM. |
 
 ---
 
@@ -50,7 +50,6 @@ End-to-end data pipeline analyzing transaction data from the **G Coffee** chain 
 ### 2.3 03-DataCleaning.ipynb — Data Cleaning
 
 #### a. Invalid Value Inspection
-
 - Orphan transactions (user_id not in Users table): **0 rows**.
 - Negative monetary values: **0 rows**.
 - Negative item quantity/price: **0 rows**.
@@ -59,7 +58,6 @@ End-to-end data pipeline analyzing transaction data from the **G Coffee** chain 
 - Price consistency: **0 items** with differing `unit_price`.
 
 #### b. Duplicate Handling
-
 - Full duplicates in `df_TransItem`: **802,939 rows**.
 - Composite duplicates `(transaction_id, item_id, created_at)`: **4,645,360 rows**.
 - Policy: Remove all rows within a `(transaction_id, item_id)` group with time difference <= 30 seconds — **2,360,635 rows removed**.
@@ -67,20 +65,17 @@ End-to-end data pipeline analyzing transaction data from the **G Coffee** chain 
 - **Final**: 0 duplicate rows remaining.
 
 #### c. Header-Detail Reconciliation
-
 - **2,284,725 transactions** had `original_amount` inconsistent with `SUM(subtotal)` of items.
 - Correction: `original_amount` overwritten with `SUM(subtotal)`.
 - Final: `final_amount = original_amount - discount_applied`.
 - Rev: `original_amount_header` backed up as audit trail before overwrite.
 
 #### d. Discount Validation
-
 - Negative discount check: 784 transactions where discount > `original_amount` (caused by SALES50 voucher).
 - Capping: `discount_applied = min(discount_applied, original_amount)`. Result: 0 negative transactions.
 - Cross-check against voucher rules: 0 mismatches.
 
 #### e. Outlier Treatment
-
 Three methods compared for `final_amount` (initial skewness ~0.53):
 | Method | Data Loss | Final Skewness |
 |--------|-----------|----------------|
@@ -91,13 +86,11 @@ Three methods compared for `final_amount` (initial skewness ~0.53):
 **Decision**: Capping at percentile 99 selected — retains 100% of data with best skewness reduction.
 
 #### f. Missing Values
-
 - `available_from` and `available_to` columns in menu_items dropped (100% null).
 
 ### 2.4 04-JoinData.ipynb — Table Joining
 
 #### Join Strategy
-
 ```
 Step 1: df_MasterTrans = df_Trans
     LEFT JOIN df_Users   -> ON user_id
@@ -112,7 +105,6 @@ Step 3: df_Master
 ```
 
 #### Validation
-
 - Row count: 26,885,688 (matches input).
 - Orphan checks: 0 for menu, store, header.
 - Financial audit: 14,623,691 transactions balanced (`original_amount = SUM(subtotal)`).
@@ -121,26 +113,23 @@ Step 3: df_Master
 ### 2.5 05-FeatureEngineering.ipynb — Feature Engineering
 
 #### a. Temporal Features
-
-| Feature              | Derivation                                                                          |
-| -------------------- | ----------------------------------------------------------------------------------- |
-| `hour`               | `dt.hour` (0-23)                                                                    |
-| `month`              | `dt.month` (1-12)                                                                   |
-| `day_name`           | `dt.day_name()`                                                                     |
-| `month_name`         | `dt.month_name()`                                                                   |
-| `is_weekend`         | 'Weekend' if Saturday/Sunday, else 'Weekday'                                        |
+| Feature | Derivation |
+|---------|-----------|
+| `hour` | `dt.hour` (0-23) |
+| `month` | `dt.month` (1-12) |
+| `day_name` | `dt.day_name()` |
+| `month_name` | `dt.month_name()` |
+| `is_weekend` | 'Weekend' if Saturday/Sunday, else 'Weekday' |
 | `transaction_period` | Morning (5-10), Afternoon (11-15), Evening (16-19), Night (20-23), Late Night (0-4) |
 
 #### b. Categorical Features
-
-| Feature           | Derivation                                            |
-| ----------------- | ----------------------------------------------------- |
-| `member_status`   | 'Member' if `user_id NOT NULL`, else 'Guest'          |
+| Feature | Derivation |
+|---------|-----------|
+| `member_status` | 'Member' if `user_id NOT NULL`, else 'Guest' |
 | `is_voucher_used` | 'Voucher' if `voucher_id NOT NULL`, else 'No Voucher' |
-| `discount_ratio`  | `discount_applied / (original_amount + 1e-6)`         |
+| `discount_ratio` | `discount_applied / (original_amount + 1e-6)` |
 
 #### c. Transaction Aggregation -> `df_transaction_features`
-
 Group by `transaction_id`:
 | Column | Aggregation | New Name |
 |--------|-------------|----------|
@@ -151,21 +140,18 @@ Group by `transaction_id`:
 | `item_id` | COUNT DISTINCT | `item_count` (Rev) |
 
 #### d. RFM Analysis -> `df_rfm`
-
 - Snapshot date: `MAX(created_at) + 1 day` (2025-07-01).
 - Scope: Members only (`user_id NOT NULL`).
 - Components: Recency (days since last transaction), Frequency (transaction count), Monetary (total spend).
 - Scaled RFM (Rev): StandardScaler -> `RFM_Scaled_Recency`, `RFM_Scaled_Frequency`, `RFM_Scaled_Monetary`.
 
 #### e. Apriori Basket Preparation (Rev)
-
 - Binary matrix `transaction_id x item_name` (1 = purchased, 0 = not).
 - Filters: remove items with support < 0.1% (none removed); remove single-item baskets (5.6M, 38%); remove baskets > 30 items (none).
 - Result: 9,064,669 transactions x 8 items, sparsity 70.6%.
 - Output: `df_basket_apriori.parquet`.
 
 #### f. Temporal Train/Test Split (Rev)
-
 - 80/20 temporal split:
   - Training: 11,698,952 transactions (80%) -- 2023-07-01 to 2025-02-04.
   - Test: 2,924,739 transactions (20%) -- 2025-02-04 to 2025-06-30.
@@ -174,17 +160,15 @@ Group by `transaction_id`:
 ### 2.6 06-EDA.ipynb — Exploratory Data Analysis
 
 #### Business Overview
-
-| Metric                    | Value (RM)        | Value (IDR x Rp3,500) |
-| ------------------------- | ----------------- | --------------------- |
-| Total Revenue             | ~RM 444.0 million | ~Rp 1.55 trillion     |
-| Total Transactions        | 14,623,691        | --                    |
-| Average Transaction Value | ~RM 30.36         | ~Rp 106,260           |
-| Member Revenue Share      | ~50%              | --                    |
-| Guest Revenue Share       | ~50%              | --                    |
+| Metric | Value (RM) | Value (IDR x Rp3,500) |
+|--------|-----------|----------------------|
+| Total Revenue | ~RM 444.0 million | ~Rp 1.55 trillion |
+| Total Transactions | 14,623,691 | -- |
+| Average Transaction Value | ~RM 30.36 | ~Rp 106,260 |
+| Member Revenue Share | ~50% | -- |
+| Guest Revenue Share | ~50% | -- |
 
 #### Analysis Sections
-
 - **Time-Based**: Daily revenue trend, hourly traffic (peak vs off-peak), monthly revenue, period-based patterns.
 - **Customer**: Revenue split (Member vs Guest), ATV comparison, repeat vs one-time behaviour, preference heatmap.
 - **Product**: Top 10 menu items by quantity, coffee vs non-coffee revenue, preference by time period and city.
@@ -198,23 +182,19 @@ Group by `transaction_id`:
 This notebook supersedes the legacy notebooks `07.ipynb`, `08-Benchmark-Models.ipynb`, `09_Hybrid_Forecast_HW_XGB.ipynb`, and `09-testingXgb.ipynb`. It consolidates all forecasting steps into a single pipeline with four sections:
 
 #### A. Baseline Models (ARIMA, SARIMA, Prophet)
-
 - Univariate time-series models fitted per branch.
 - ARIMA/SARIMA with automatic order selection via `auto_arima`.
 - Prophet (Facebook) with weekly seasonality.
 - Metrics: MAE, RMSE, MAPE per branch, aggregated across all 10 branches.
 
 #### B. XGBoost Supervised Learning
-
 - Pooled multivariate model using autoregressive features (lag_1, lag_7, rolling_avg_7), calendar features (day_of_week, month), voucher_rate, and one-hot encoded city.
 - Temporal train/test split at 2025-03-25 (80/20).
 - Feature importance analysis (gain-based).
 - Residual diagnostics.
 
 #### C. Hybrid Forecasting (Detrending Architectures)
-
 Three architectures compared:
-
 - **HWR-XGB**: Holt-Winters (additive trend, seasonal_periods=365) + XGBoost on residuals.
 - **SARIMA-XGB**: SARIMA + XGBoost on residuals.
 - **Prophet-XGB**: Prophet + XGBoost on residuals.
@@ -222,7 +202,6 @@ Three architectures compared:
 XGBoost on residuals uses only non-autoregressive features (day_of_week, month, voucher_rate) to avoid the low-pass filter problem in recursive forecasting.
 
 #### D. Comparative Evaluation and Output
-
 - Cross-architecture comparison on held-out test set.
 - Best model selection: lowest MAE on test set.
 - 90-day ahead forecast saved as `df_forecast_90days.parquet` for the Voucher Engine.
@@ -233,52 +212,49 @@ XGBoost on residuals uses only non-autoregressive features (day_of_week, month, 
 ## 3. Custom Module (`function.py`)
 
 ### 3.1 Class `CleaningData`
-
-| Method                                     | Parameters            | Returns                                       | Description                                                 |
-| ------------------------------------------ | --------------------- | --------------------------------------------- | ----------------------------------------------------------- |
-| `Duplicate(column_name)`                   | Column name           | int                                           | Counts duplicate rows in a column.                          |
-| `BoxPlot(column_name, Target)`             | Column, optional data | Visual                                        | Boxplot for outlier detection.                              |
-| `HistPlot(column_name, Target)`            | Column, optional data | Visual                                        | Histogram for distribution analysis.                        |
-| `iqr(column_name)`                         | Column name           | (outlier_count, original_count, cleaned_data) | IQR method: values outside 1.5xIQR considered outliers.     |
-| `capping(column_name)`                     | Column name           | (skewness, affected_count, capped_data)       | Winsorization at percentile 99.                             |
-| `log_transform(column_name)`               | Column name           | (skewness, transformed_data)                  | Log1p transformation.                                       |
-| `z_score_method(column_name, threshold=3)` | Column, threshold     | (outlier_count, original_count, cleaned_data) | Z-Score method: values with \|z\| > threshold are outliers. |
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `Duplicate(column_name)` | Column name | int | Counts duplicate rows in a column. |
+| `BoxPlot(column_name, Target)` | Column, optional data | Visual | Boxplot for outlier detection. |
+| `HistPlot(column_name, Target)` | Column, optional data | Visual | Histogram for distribution analysis. |
+| `iqr(column_name)` | Column name | (outlier_count, original_count, cleaned_data) | IQR method: values outside 1.5xIQR considered outliers. |
+| `capping(column_name)` | Column name | (skewness, affected_count, capped_data) | Winsorization at percentile 99. |
+| `log_transform(column_name)` | Column name | (skewness, transformed_data) | Log1p transformation. |
+| `z_score_method(column_name, threshold=3)` | Column, threshold | (outlier_count, original_count, cleaned_data) | Z-Score method: values with \|z\| > threshold are outliers. |
 
 ### 3.2 Memory Optimisation Functions
-
-| Function                                   | Parameters           | Description                                                |
-| ------------------------------------------ | -------------------- | ---------------------------------------------------------- |
-| `optimize_numeric_data(df)`                | DataFrame            | Downcasts float64->float32, int64->int8/Int32.             |
+| Function | Parameters | Description |
+|----------|-----------|-------------|
+| `optimize_numeric_data(df)` | DataFrame | Downcasts float64->float32, int64->int8/Int32. |
 | `optimize_object_data(df, threshold=0.05)` | DataFrame, threshold | Converts low-cardinality (<5%) object columns to category. |
 
 ### 3.3 Notebooks Using `function.py`
-
-| Notebook          | Functions Called                                                                                          |
-| ----------------- | --------------------------------------------------------------------------------------------------------- |
-| `01-LoadData`     | `optimize_numeric_data()`, `optimize_object_data()`                                                       |
+| Notebook | Functions Called |
+|----------|-----------------|
+| `01-LoadData` | `optimize_numeric_data()`, `optimize_object_data()` |
 | `03-DataCleaning` | `CleaningData` (`.Duplicate()`, `.BoxPlot()`, `.HistPlot()`, `.iqr()`, `.capping()`, `.z_score_method()`) |
 
 ---
 
 ## 4. Output Files Summary
 
-| File                                | Rows                        | Description                                             |
-| ----------------------------------- | --------------------------- | ------------------------------------------------------- |
-| `transactions.parquet`              | 14,623,691                  | Transaction headers -- after load and validation.       |
-| `transaction_items.parquet`         | 29,246,323                  | Items per transaction -- after load and validation.     |
-| `transactions_capping.parquet`      | 14,623,691                  | Headers with outliers capped at P99.                    |
-| `transaction_items_cleaned.parquet` | 26,885,688                  | Items after duplicate removal.                          |
-| `users_cleaned.parquet`             | 2,196,257                   | Users after cleaning.                                   |
-| `menu_cleaned.parquet`              | 8                           | Menu without `available_from/to` columns.               |
-| `stores_cleaned.parquet`            | 10                          | Store data -- intact.                                   |
-| `df_Master_Final.parquet`           | 26,885,688                  | Item-level master (all tables joined).                  |
-| `df_Master_FE.parquet`              | 26,885,688                  | Master with engineered features.                        |
-| `df_transaction_features.parquet`   | 14,623,691                  | Transaction-level features (1 row per transaction).     |
-| `df_rfm.parquet`                    | 2,196,257                   | RFM per user + scaled features.                         |
-| `df_basket_apriori.parquet`         | 9,064,669                   | Binary matrix for Apriori.                              |
-| `df_train.parquet`                  | 11,698,952                  | Training set (80% temporal split).                      |
-| `df_test.parquet`                   | 2,924,739                   | Test set (20% temporal split).                          |
-| `df_forecast_90days.parquet`        | 900 (90 days x 10 branches) | 90-day forecast output (best model) for Voucher Engine. |
+| File | Rows | Description |
+|------|------|-------------|
+| `transactions.parquet` | 14,623,691 | Transaction headers -- after load and validation. |
+| `transaction_items.parquet` | 29,246,323 | Items per transaction -- after load and validation. |
+| `transactions_capping.parquet` | 14,623,691 | Headers with outliers capped at P99. |
+| `transaction_items_cleaned.parquet` | 26,885,688 | Items after duplicate removal. |
+| `users_cleaned.parquet` | 2,196,257 | Users after cleaning. |
+| `menu_cleaned.parquet` | 8 | Menu without `available_from/to` columns. |
+| `stores_cleaned.parquet` | 10 | Store data -- intact. |
+| `df_Master_Final.parquet` | 26,885,688 | Item-level master (all tables joined). |
+| `df_Master_FE.parquet` | 26,885,688 | Master with engineered features. |
+| `df_transaction_features.parquet` | 14,623,691 | Transaction-level features (1 row per transaction). |
+| `df_rfm.parquet` | 2,196,257 | RFM per user + scaled features. |
+| `df_basket_apriori.parquet` | 9,064,669 | Binary matrix for Apriori. |
+| `df_train.parquet` | 11,698,952 | Training set (80% temporal split). |
+| `df_test.parquet` | 2,924,739 | Test set (20% temporal split). |
+| `df_forecast_90days.parquet` | 900 (90 days x 10 branches) | 90-day forecast output (best model) for Voucher Engine. |
 
 ---
 
@@ -312,7 +288,6 @@ Run notebooks in sequence:
 ```
 
 Secondary notebooks (run after 05-FeatureEngineering):
-
 ```
 K-MeansMember.ipynb + aprioriMember.ipynb
 K-MeansNonMember.ipynb + aprioriNonMember.ipynb
@@ -320,68 +295,7 @@ K-MeansNonMember.ipynb + aprioriNonMember.ipynb
 
 Legacy notebooks `07.ipynb`, `08-Benchmark-Models.ipynb`, `09_Hybrid_Forecast_HW_XGB.ipynb`, and `09-testingXgb.ipynb` are superseded by `06_Modeling_and_Evaluation.ipynb` and retained for reference only.
 
-# Ensure `function.py` is in the same directory. Internet connectivity and Kaggle API credentials are required for `01-LoadData.ipynb`.
-
----
-
-## **How to Reproduce**
-
-Follow these steps to reproduce the data pipeline, analyses, and forecasts from this repository.
-
-- **Prerequisites:** Python 3.12+, Git, Internet access, and Kaggle API credentials (`kaggle.json`) if using the Kaggle CLI.
-
-- **Create & activate virtual environment (PowerShell example):**
-
-```
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-- **Install Python dependencies:**
-
-```
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-- **Download dataset:**
-- Option A — Kaggle CLI (recommended):
-
-```
-kaggle datasets download -d geraldooizx/g-coffee-shop-transaction-202307-to-202506 -p data --unzip
-```
-
-- Option B — run the downloader cell in [01-LoadData.ipynb](01-LoadData.ipynb) which uses `kagglehub.dataset_download()` (requires Kaggle credentials configured).
-
-- **Run notebooks in order (recommended):**
-
-1. [01-LoadData.ipynb](01-LoadData.ipynb)
-2. [02-DataValidation.ipynb](02-DataValidation.ipynb)
-3. [03-DataCleaning.ipynb](03-DataCleaning.ipynb)
-4. [04-JoinData.ipynb](04-JoinData.ipynb)
-5. [05-FeatureEngineering.ipynb](05-FeatureEngineering.ipynb)
-6. [06-EDA.ipynb](06-EDA.ipynb)
-7. [06_Modeling_and_Evaluation.ipynb](06_Modeling_and_Evaluation.ipynb)
-
-Run notebooks interactively via Jupyter Lab/Notebook or VS Code Jupyter extension. To start Jupyter Lab:
-
-```
-jupyter lab
-```
-
-- **Expected outputs:** Parquet files and model artifacts are written to the project root (examples listed in **4. Output Files Summary**). Pre-trained artifacts included in this repo (if present): [model_kmeans_guest.joblib](model_kmeans_guest.joblib), [model_kmeans_member.joblib](model_kmeans_member.joblib), [scaler_guest.joblib](scaler_guest.joblib), [scaler_member.joblib](scaler_member.joblib).
-
-- **Reproduce forecasting results:** Open and run [06_Modeling_and_Evaluation.ipynb](06_Modeling_and_Evaluation.ipynb). The final 90-day forecasts are saved as `df_forecast_90days.parquet`.
-
-- **Quick snippets:** Load a saved model with `joblib`:
-
-```
-from joblib import load
-model = load('model_kmeans_member.joblib')
-scaler = load('scaler_member.joblib')
-```
-
-- **Notes & troubleshooting:**
-  - Recommended RAM: 16+ GB for full in-memory processing; use a larger machine or chunking for constrained environments.
-  - If you encounter memory issues, run steps in `01-LoadData.ipynb` with smaller chunks or sample subsets.
-  - If Kaggle downloads fail, confirm `kaggle.json` is placed in `%USERPROFILE%\.kaggle\kaggle.json` and permissions are correct.
+Ensure `function.py` is in the same directory. Internet connectivity and Kaggle API credentials are required for `01-LoadData.ipynb`.
+#   C a p s t o n e - P r o j e c t 
+ 
+ 
